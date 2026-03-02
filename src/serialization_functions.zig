@@ -23,6 +23,7 @@ fn seenType(comptime seen: []const type, comptime T: type) bool {
 }
 
 fn maxAlignmentInner(comptime T: type, comptime seen: []const type) std.mem.Alignment {
+    @setEvalBranchQuota(1_000_000);
     if (seenType(seen, T)) return .@"1";
     const next_seen = seen ++ [1]type{T};
     return switch (@typeInfo(T)) {
@@ -61,6 +62,7 @@ fn maxAlignmentInner(comptime T: type, comptime seen: []const type) std.mem.Alig
 }
 
 pub fn maxAlignmentOf(comptime T: type) std.mem.Alignment {
+    @setEvalBranchQuota(1_000_000);
     return maxAlignmentInner(T, &.{});
 }
 

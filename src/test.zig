@@ -658,7 +658,7 @@ test "multi-level mutual recursion with unions slices arrays pointers enums (acy
             chooser: union(enum) {
                 primary: *const Leaf,
                 alt: ?*const Leaf,
-                packed: [2]u8,
+                packed_bytes: [2]u8,
             },
             health: error{Offline}![]const u8,
         };
