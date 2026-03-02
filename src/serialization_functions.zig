@@ -17,6 +17,57 @@ pub const ValidationError = error{
 pub const SerializeError = ValidationError || error{ OutOfMemory, NoSpaceLeft };
 pub const DeserializeError = ValidationError || error{OutOfMemory};
 
+fn seenType(comptime seen: []const type, comptime T: type) bool {
+    inline for (seen) |s| if (s == T) return true;
+    return false;
+}
+
+fn maxAlignmentInner(comptime T: type, comptime seen: []const type) std.mem.Alignment {
+    if (seenType(seen, T)) return .@"1";
+    const next_seen = seen ++ [1]type{T};
+    return switch (@typeInfo(T)) {
+        .void, .null => .@"1",
+        .bool, .int, .float, .vector => std.mem.Alignment.fromByteUnits(@alignOf(T)),
+        .@"enum" => |ei| std.mem.Alignment.fromByteUnits(@alignOf(ei.tag_type)),
+        .array => |ai| maxAlignmentInner(ai.child, next_seen),
+        .pointer => |pi| switch (pi.size) {
+            .one => maxAlignmentInner(pi.child, next_seen),
+            .slice => maxAlignmentInner(pi.child, next_seen)
+                .max(std.mem.Alignment.fromByteUnits(pi.alignment))
+                .max(std.mem.Alignment.fromByteUnits(@alignOf(root.Size))),
+            .many, .c => @compileError("Unsupported pointer type in oneserial destructive format: " ++ @tagName(pi.size) ++ " for " ++ @typeName(T)),
+        },
+        .@"struct" => |si| blk: {
+            var out: std.mem.Alignment = .@"1";
+            inline for (si.fields) |field| {
+                out = out.max(maxAlignmentInner(field.type, next_seen));
+            }
+            break :blk out;
+        },
+        .optional => |oi| maxAlignmentInner(oi.child, next_seen).max(.@"1"),
+        .error_union => |ei| maxAlignmentInner(ei.payload, next_seen).max(std.mem.Alignment.fromByteUnits(@alignOf(u16))),
+        .@"union" => |ui| blk: {
+            var out: std.mem.Alignment = .@"1";
+            if (ui.tag_type) |Tag| out = out.max(std.mem.Alignment.fromByteUnits(@alignOf(Tag)));
+            inline for (ui.fields) |field| {
+                out = out.max(maxAlignmentInner(field.type, next_seen));
+            }
+            break :blk out;
+        },
+        .type, .noreturn, .comptime_int, .comptime_float, .undefined, .@"fn", .frame, .@"anyframe", .enum_literal, .@"opaque", .error_set => {
+            @compileError("Unsupported type in oneserial: " ++ @typeName(T));
+        },
+    };
+}
+
+pub fn maxAlignmentOf(comptime T: type) std.mem.Alignment {
+    return maxAlignmentInner(T, &.{});
+}
+
+pub fn SerializeBytes(comptime T: type) type {
+    return []align(maxAlignmentOf(T).toByteUnits()) u8;
+}
+
 fn ReturnType(comptime trusted: bool, comptime T: type) type {
     return if (trusted) T else ValidationError!T;
 }
@@ -174,7 +225,8 @@ fn serializeValue(comptime T: type, w: *Writer(), value: *const T) ValidationErr
         },
         .@"struct" => |si| {
             inline for (si.fields) |field| {
-                try serializeValue(field.type, w, &@field(value.*, field.name));
+                var field_copy = @field(value.*, field.name);
+                try serializeValue(field.type, w, &field_copy);
             }
         },
         .optional => |oi| {
@@ -282,6 +334,13 @@ fn skipValue(comptime T: type, r: *Reader()) ValidationError!void {
 
 fn Decoded(comptime T: type) type {
     return struct { value: T };
+}
+
+fn returnDecoded(comptime T: type, decoded: Decoded(T)) T {
+    return switch (@typeInfo(T)) {
+        .error_union => if (decoded.value) |payload| payload else |e| @as(@typeInfo(T).error_union.error_set, @errorCast(e)),
+        else => decoded.value,
+    };
 }
 
 fn decodeValue(comptime T: type, r: *Reader(), gpa: std.mem.Allocator) DeserializeError!Decoded(T) {
@@ -503,12 +562,15 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
                 if (comptime trusted) unreachable;
                 return toOutOfBounds(err);
             };
-            return decoded.value;
+            const out: T = returnDecoded(T, decoded);
+            return out;
         }
 
         pub fn toOwned(self: @This(), gpa: std.mem.Allocator) DeserializeError!T {
             var r = Reader().initAt(self.bytes, self.start, !trusted);
-            return (try decodeValue(T, &r, gpa)).value;
+            const decoded = try decodeValue(T, &r, gpa);
+            const out: T = returnDecoded(T, decoded);
+            return out;
         }
     };
 }
@@ -519,9 +581,9 @@ fn validateExact(comptime T: type, bytes: []const u8) ValidationError!void {
     if (r.pos != bytes.len) return error.TooManyBytes;
 }
 
-fn decodeRootExact(comptime T: type, bytes: []const u8, checked: bool, gpa: std.mem.Allocator) DeserializeError!T {
+fn decodeRootExact(comptime T: type, bytes: []const u8, checked: bool, gpa: std.mem.Allocator) DeserializeError!Decoded(T) {
     var r = Reader().init(bytes, checked);
-    const out = (try decodeValue(T, &r, gpa)).value;
+    const out = try decodeValue(T, &r, gpa);
     if (checked and r.pos != bytes.len) return error.TooManyBytes;
     return out;
 }
@@ -529,6 +591,7 @@ fn decodeRootExact(comptime T: type, bytes: []const u8, checked: bool, gpa: std.
 pub fn Converter(comptime T: type) type {
     return struct {
         pub const Type = T;
+        pub const alignment = maxAlignmentOf(T);
         pub const Untrusted = struct {
             bytes: []const u8,
             view: View(T, false),
@@ -550,7 +613,9 @@ pub fn Converter(comptime T: type) type {
             }
 
             pub fn toOwned(self: @This(), gpa: std.mem.Allocator) DeserializeError!T {
-                return decodeRootExact(T, self.bytes, true, gpa);
+                const decoded = try decodeRootExact(T, self.bytes, true, gpa);
+                const out: T = returnDecoded(T, decoded);
+                return out;
             }
 
             pub fn field(self: @This(), comptime field_name: []const u8) ValidationError!View(fieldTypeByName(T, field_name), false) {
@@ -596,7 +661,9 @@ pub fn Converter(comptime T: type) type {
             }
 
             pub fn toOwned(self: @This(), gpa: std.mem.Allocator) DeserializeError!T {
-                return decodeRootExact(T, self.bytes, false, gpa);
+                const decoded = try decodeRootExact(T, self.bytes, false, gpa);
+                const out: T = returnDecoded(T, decoded);
+                return out;
             }
 
             pub fn field(self: @This(), comptime field_name: []const u8) View(fieldTypeByName(T, field_name), true) {
@@ -631,7 +698,7 @@ pub fn Converter(comptime T: type) type {
         };
 
         pub const Wrapper = struct {
-            memory: []u8,
+            memory: SerializeBytes(T),
 
             pub fn init(value: *const T, gpa: std.mem.Allocator) SerializeError!@This() {
                 return .{ .memory = try serializeAlloc(value, gpa) };
@@ -656,9 +723,9 @@ pub fn Converter(comptime T: type) type {
             return w.pos;
         }
 
-        pub fn serializeAlloc(value: *const T, gpa: std.mem.Allocator) SerializeError![]u8 {
+        pub fn serializeAlloc(value: *const T, gpa: std.mem.Allocator) SerializeError!SerializeBytes(T) {
             const size = try serializedSize(value);
-            const bytes = try gpa.alloc(u8, size);
+            const bytes = try gpa.alignedAlloc(u8, alignment, size);
             errdefer gpa.free(bytes);
             var w = Writer().init(bytes);
             try serializeValue(T, &w, value);

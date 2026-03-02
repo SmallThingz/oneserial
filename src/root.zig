@@ -28,7 +28,12 @@ pub fn Trusted(comptime T: type, options: MergeOptions) type {
     return Converter(T, options).Trusted;
 }
 
-pub fn serializeAlloc(comptime T: type, options: MergeOptions, value: *const T, gpa: std.mem.Allocator) SerializeError![]u8 {
+pub fn serializeAlloc(
+    comptime T: type,
+    options: MergeOptions,
+    value: *const T,
+    gpa: std.mem.Allocator,
+) SerializeError!SerializationFunctions.SerializeBytes(T) {
     return Converter(T, options).serializeAlloc(value, gpa);
 }
 
