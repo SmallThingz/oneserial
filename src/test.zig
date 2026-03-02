@@ -152,7 +152,7 @@ fn freeOwned(comptime T: type, gpa: std.mem.Allocator, value: *T) void {
 }
 
 fn testRoundtrip(_value: anytype) !void {
-    var value = _value;
+    const value = _value;
     const T = @TypeOf(value);
 
     const bytes = try one.serializeAlloc(T, .{}, &value, testing.allocator);
@@ -888,6 +888,362 @@ test "accessor chaining and dynamic get" {
     const second_checked = try second.get();
     const ch = try second_checked.at(1);
     try testing.expectEqual(@as(u8, 'b'), try ch.value());
+}
+
+test "single massive messy quadruple-mutual-recursive type graph (acyclic data)" {
+    const Namespace = struct {
+        const Mode = enum { alpha, beta, gamma };
+        const Class = enum { leaf, branch, core };
+        const StatusErr = error{ Disconnected, Corrupt };
+
+        const Event = union(enum) {
+            none: void,
+            count: i64,
+            bytes: []const u8,
+            flags: [4]bool,
+            ints: [3]u16,
+            vec: @Vector(4, u8),
+            nested: struct {
+                score: f32,
+                tag: ?[]const u8,
+                arr: [2]u32,
+            },
+        };
+
+        const NodeA = struct {
+            active: bool,
+            count: i32,
+            ratio: f64,
+            mode: Mode,
+            main_b: *const NodeB,
+            aux_b: []const ?*const NodeB,
+            main_c: ?*const NodeC,
+            head_d: ?*const NodeD,
+            title: []const u8,
+            notes: []const union(enum) { text: []const u8, code: u16, flag: bool },
+            route: [2]Event,
+            maybe_status: ?StatusErr![]const u8,
+            packed_bits: packed struct { a: u3, b: bool, c: u4 },
+            scratch: [2][3]u8,
+            vec4: @Vector(4, f32),
+            nil: @TypeOf(null),
+            nothing: void,
+            meta: union(enum) {
+                plain: u32,
+                pair: [2]i16,
+                ptr: ?*const NodeD,
+                details: struct { ok: bool, msg: []const u8, maybe: ?[]const u8 },
+            },
+        };
+
+        const NodeB = struct {
+            bid: u32,
+            label: []const u8,
+            parent: ?*const NodeA,
+            primary_c: *const NodeC,
+            secondary: ?*const NodeC,
+            d_list: []const *const NodeD,
+            payload: union(enum) {
+                n: u64,
+                text: []const u8,
+                ev: Event,
+                bits: packed struct { x: u2, y: u3, z: bool },
+            },
+            opt_num: ?u64,
+            tags: []const []const u8,
+        };
+
+        const Chunk = struct {
+            kind: Class,
+            data: []const u8,
+            ref_a: ?*const NodeA,
+            ref_c: ?*const NodeC,
+            refs_d: [3]?*const NodeD,
+            nil: @TypeOf(null),
+            vv: @Vector(2, i16),
+        };
+
+        const NodeC = struct {
+            cid: u16,
+            owner: ?*const NodeB,
+            branch: *const NodeD,
+            backlinks: [2]?*const NodeD,
+            chunks: []const Chunk,
+            maybe_event: ?Event,
+            status: StatusErr![]const u8,
+            matrix: [2][3]u8,
+        };
+
+        const NodeD = struct {
+            did: u32,
+            class: Class,
+            name: []const u8,
+            next: ?*const NodeD,
+            mirror_a: ?*const NodeA,
+            mirror_c: ?*const NodeC,
+            events: []const Event,
+            watchers: []const ?*const NodeB,
+            state: union(enum) {
+                empty: void,
+                bytes: []const u8,
+                ids: [3]u16,
+                opt: ?*const NodeC,
+            },
+            outcome: StatusErr![]const u8,
+        };
+    };
+
+    const Event = Namespace.Event;
+    const NodeA = Namespace.NodeA;
+    const NodeB = Namespace.NodeB;
+    const NodeC = Namespace.NodeC;
+    const NodeD = Namespace.NodeD;
+    const Chunk = Namespace.Chunk;
+
+    const ev1: Event = .{ .none = {} };
+    const ev2: Event = .{ .count = -5 };
+    const ev3: Event = .{ .bytes = "ev-three" };
+    const ev4: Event = .{ .flags = .{ true, false, true, false } };
+    const ev5: Event = .{ .ints = .{ 10, 20, 30 } };
+    const ev6: Event = .{ .vec = .{ 1, 2, 3, 4 } };
+    const ev7: Event = .{ .nested = .{ .score = 9.25, .tag = "tagged", .arr = .{ 7, 8 } } };
+
+    const d3 = NodeD{
+        .did = 300,
+        .class = .leaf,
+        .name = "d3",
+        .next = null,
+        .mirror_a = null,
+        .mirror_c = null,
+        .events = &.{ ev1, ev2, ev7 },
+        .watchers = &.{ null, null },
+        .state = .{ .empty = {} },
+        .outcome = "d3-ok",
+    };
+
+    const d2 = NodeD{
+        .did = 200,
+        .class = .branch,
+        .name = "d2",
+        .next = &d3,
+        .mirror_a = null,
+        .mirror_c = null,
+        .events = &.{ ev3, ev4, ev5 },
+        .watchers = &.{ null, null, null },
+        .state = .{ .ids = .{ 1, 2, 3 } },
+        .outcome = error.Disconnected,
+    };
+
+    const d1 = NodeD{
+        .did = 100,
+        .class = .core,
+        .name = "d1",
+        .next = &d2,
+        .mirror_a = null,
+        .mirror_c = null,
+        .events = &.{ ev6, ev7, ev1, ev3 },
+        .watchers = &.{ null, null },
+        .state = .{ .bytes = "d1-state" },
+        .outcome = "d1-ok",
+    };
+
+    const ch1 = Chunk{
+        .kind = .leaf,
+        .data = "chunk-1",
+        .ref_a = null,
+        .ref_c = null,
+        .refs_d = .{ &d1, &d2, null },
+        .nil = null,
+        .vv = .{ 1, 2 },
+    };
+
+    const ch2 = Chunk{
+        .kind = .branch,
+        .data = "chunk-2",
+        .ref_a = null,
+        .ref_c = null,
+        .refs_d = .{ &d2, &d3, null },
+        .nil = null,
+        .vv = .{ -3, 4 },
+    };
+
+    const ch3 = Chunk{
+        .kind = .core,
+        .data = "",
+        .ref_a = null,
+        .ref_c = null,
+        .refs_d = .{ null, null, &d3 },
+        .nil = null,
+        .vv = .{ 7, -8 },
+    };
+
+    const c3 = NodeC{
+        .cid = 30,
+        .owner = null,
+        .branch = &d3,
+        .backlinks = .{ &d3, null },
+        .chunks = &.{ ch3 },
+        .maybe_event = null,
+        .status = "c3-ok",
+        .matrix = .{ .{ 9, 8, 7 }, .{ 6, 5, 4 } },
+    };
+
+    const c2 = NodeC{
+        .cid = 20,
+        .owner = null,
+        .branch = &d2,
+        .backlinks = .{ &d3, &d2 },
+        .chunks = &.{ ch2, ch3 },
+        .maybe_event = ev5,
+        .status = error.Disconnected,
+        .matrix = .{ .{ 4, 5, 6 }, .{ 7, 8, 9 } },
+    };
+
+    const c1 = NodeC{
+        .cid = 10,
+        .owner = null,
+        .branch = &d1,
+        .backlinks = .{ &d2, &d3 },
+        .chunks = &.{ ch1, ch2, ch3 },
+        .maybe_event = ev7,
+        .status = "c1-ok",
+        .matrix = .{ .{ 1, 2, 3 }, .{ 3, 2, 1 } },
+    };
+
+    const b2 = NodeB{
+        .bid = 2,
+        .label = "b2",
+        .parent = null,
+        .primary_c = &c3,
+        .secondary = null,
+        .d_list = &.{ &d2, &d3 },
+        .payload = .{ .ev = ev5 },
+        .opt_num = null,
+        .tags = &.{ "b2", "leaf" },
+    };
+
+    const b1 = NodeB{
+        .bid = 1,
+        .label = "b1",
+        .parent = null,
+        .primary_c = &c1,
+        .secondary = &c2,
+        .d_list = &.{ &d1, &d2, &d3 },
+        .payload = .{ .bits = .{ .x = 2, .y = 5, .z = true } },
+        .opt_num = 77,
+        .tags = &.{ "b1", "root", "messy" },
+    };
+
+    const root = NodeA{
+        .active = true,
+        .count = -123,
+        .ratio = 2.5,
+        .mode = .gamma,
+        .main_b = &b1,
+        .aux_b = &.{ &b2, null, &b1 },
+        .main_c = &c1,
+        .head_d = &d1,
+        .title = "mega-root",
+        .notes = &.{ .{ .text = "note-a" }, .{ .code = 42 }, .{ .flag = true } },
+        .route = .{ ev4, ev7 },
+        .maybe_status = error.Corrupt,
+        .packed_bits = .{ .a = 5, .b = true, .c = 9 },
+        .scratch = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 } },
+        .vec4 = .{ 1.0, 2.0, 3.5, 4.5 },
+        .nil = null,
+        .nothing = {},
+        .meta = .{ .details = .{ .ok = false, .msg = "details", .maybe = null } },
+    };
+
+    try testRoundtrip(root);
+}
+
+test "type-id coverage for every Zig language type tag" {
+    const SF = one.SerializationFunctions;
+    const fields = @typeInfo(std.builtin.TypeId).@"enum".fields;
+
+    inline for (fields) |f| {
+        const tag: std.builtin.TypeId = @enumFromInt(f.value);
+        const expected = switch (tag) {
+            .void,
+            .bool,
+            .int,
+            .float,
+            .vector,
+            .@"enum",
+            .array,
+            .pointer,
+            .@"struct",
+            .optional,
+            .error_union,
+            .@"union",
+            .null,
+            => true,
+            .type,
+            .noreturn,
+            .comptime_int,
+            .comptime_float,
+            .undefined,
+            .@"fn",
+            .frame,
+            .@"anyframe",
+            .enum_literal,
+            .@"opaque",
+            .error_set,
+            => false,
+        };
+        try testing.expectEqual(expected, SF.supportsTypeId(tag));
+    }
+}
+
+test "type-level support coverage with representative types" {
+    const SF = one.SerializationFunctions;
+
+    // Supported
+    try testing.expect(SF.supportsType(void));
+    try testing.expect(SF.supportsType(bool));
+    try testing.expect(SF.supportsType(i64));
+    try testing.expect(SF.supportsType(f64));
+    try testing.expect(SF.supportsType(@Vector(4, f32)));
+    try testing.expect(SF.supportsType(enum { a, b }));
+    try testing.expect(SF.supportsType([3]u8));
+    try testing.expect(SF.supportsType(*const u8));
+    try testing.expect(SF.supportsType([]const u8));
+    try testing.expect(SF.supportsType(struct { a: u8, b: []const u8 }));
+    try testing.expect(SF.supportsType(?[]const u8));
+    try testing.expect(SF.supportsType(error{E}![]const u8));
+    try testing.expect(SF.supportsType(union(enum) { a: u8, b: []const u8 }));
+    try testing.expect(SF.supportsType(@TypeOf(null)));
+
+    // Unsupported
+    try testing.expect(!SF.supportsType(type));
+    try testing.expect(!SF.supportsType(noreturn));
+    try testing.expect(!SF.supportsType(@TypeOf(1)));
+    try testing.expect(!SF.supportsType(@TypeOf(1.5)));
+    try testing.expect(!SF.supportsType(@TypeOf(undefined)));
+    try testing.expect(!SF.supportsType(fn () void));
+    try testing.expect(!SF.supportsType(@TypeOf(.foo)));
+    try testing.expect(!SF.supportsType(opaque {}));
+    try testing.expect(!SF.supportsType(error{A}));
+    try testing.expect(!SF.supportsType([*]const u8));
+    try testing.expect(!SF.supportsType([*c]const u8));
+    try testing.expect(!SF.supportsType(union { a: u8, b: u16 }));
+}
+
+test "null type roundtrip" {
+    const NullT = @TypeOf(null);
+    const v = @as(NullT, null);
+    const C = one.Converter(NullT, .{});
+
+    const size = try C.serializedSize(&v);
+    try testing.expectEqual(@as(usize, 0), size);
+
+    const bytes = try one.serializeAlloc(NullT, .{}, &v, testing.allocator);
+    defer testing.allocator.free(bytes);
+    try testing.expectEqual(@as(usize, 0), bytes.len);
+
+    const untrusted = one.Untrusted(NullT, .{}).init(bytes);
+    _ = try untrusted.validate();
 }
 
 test {

@@ -17,9 +17,78 @@ pub const ValidationError = error{
 pub const SerializeError = ValidationError || error{ OutOfMemory, NoSpaceLeft };
 pub const DeserializeError = ValidationError || error{OutOfMemory};
 
+/// Tag-level support. Some tags (pointer/union) require additional shape checks;
+/// use `supportsType` for full type-level validation.
+pub fn supportsTypeId(tag: std.builtin.TypeId) bool {
+    return switch (tag) {
+        .void,
+        .bool,
+        .int,
+        .float,
+        .vector,
+        .@"enum",
+        .array,
+        .pointer,
+        .@"struct",
+        .optional,
+        .error_union,
+        .@"union",
+        .null,
+        => true,
+        else => false,
+    };
+}
+
 fn seenType(comptime seen: []const type, comptime T: type) bool {
     inline for (seen) |s| if (s == T) return true;
     return false;
+}
+
+fn supportsTypeInner(comptime T: type, comptime seen: []const type) bool {
+    @setEvalBranchQuota(1_000_000);
+    if (seenType(seen, T)) return true;
+    const next_seen = seen ++ [1]type{T};
+
+    return switch (@typeInfo(T)) {
+        .void, .bool, .int, .float, .vector, .null => true,
+        .@"enum" => true,
+        .array => |ai| supportsTypeInner(ai.child, next_seen),
+        .pointer => |pi| switch (pi.size) {
+            .one, .slice => supportsTypeInner(pi.child, next_seen),
+            .many, .c => false,
+        },
+        .@"struct" => |si| blk: {
+            inline for (si.fields) |field| {
+                if (!supportsTypeInner(field.type, next_seen)) break :blk false;
+            }
+            break :blk true;
+        },
+        .optional => |oi| supportsTypeInner(oi.child, next_seen),
+        .error_union => |ei| supportsTypeInner(ei.payload, next_seen),
+        .@"union" => |ui| blk: {
+            if (ui.tag_type == null) break :blk false;
+            inline for (ui.fields) |field| {
+                if (!supportsTypeInner(field.type, next_seen)) break :blk false;
+            }
+            break :blk true;
+        },
+        .type,
+        .noreturn,
+        .comptime_int,
+        .comptime_float,
+        .undefined,
+        .@"fn",
+        .frame,
+        .@"anyframe",
+        .enum_literal,
+        .@"opaque",
+        .error_set,
+        => false,
+    };
+}
+
+pub fn supportsType(comptime T: type) bool {
+    return supportsTypeInner(T, &.{});
 }
 
 fn maxAlignmentInner(comptime T: type, comptime seen: []const type) std.mem.Alignment {
