@@ -1,15 +1,13 @@
 .{
   .name = .oneserial,
   .version = "0.1.0",
-  .fingerprint = 0x4de8a7a7f4865766,
+  .fingerprint = 0x1b8ae36f66bebfbe,
   .paths = .{
     "build.zig",
     "build.zig.zon",
     "src/meta.zig",
     "src/root.zig",
-    "src/serialization_functions",
-    "LICENSE",
-    "readme.md",
+    "src/serialization_functions.zig",
+    "src/test.zig",
   },
 }
-
