@@ -178,7 +178,7 @@ fn Writer() type {
         }
 
         fn alignTo(self: *@This(), comptime alignment: usize) ValidationError!void {
-            const new_pos = meta.alignForwardChecked(self.pos, alignment) catch return error.LengthOverflow;
+            const new_pos = meta.alignForward(self.pos, alignment) catch return error.LengthOverflow;
             if (self.buffer) |buf| {
                 if (new_pos > buf.len) return error.NotEnoughBytes;
                 if (new_pos > self.pos) @memset(buf[self.pos..new_pos], 0);
@@ -187,7 +187,7 @@ fn Writer() type {
         }
 
         fn writeBytes(self: *@This(), bytes: []const u8) ValidationError!void {
-            const end = meta.addChecked(self.pos, bytes.len) catch return error.LengthOverflow;
+            const end = std.math.add(usize, self.pos, bytes.len) catch return error.LengthOverflow;
             if (self.buffer) |buf| {
                 if (end > buf.len) return error.NotEnoughBytes;
                 @memcpy(buf[self.pos..end], bytes);
@@ -218,13 +218,13 @@ fn Reader() type {
         }
 
         fn alignTo(self: *@This(), comptime alignment: usize) ValidationError!void {
-            const new_pos = meta.alignForwardChecked(self.pos, alignment) catch return error.LengthOverflow;
+            const new_pos = meta.alignForward(self.pos, alignment) catch return error.LengthOverflow;
             if (self.checked and new_pos > self.bytes.len) return error.NotEnoughBytes;
             self.pos = new_pos;
         }
 
         fn readBytes(self: *@This(), len: usize) ValidationError![]const u8 {
-            const end = meta.addChecked(self.pos, len) catch return error.LengthOverflow;
+            const end = std.math.add(usize, self.pos, len) catch return error.LengthOverflow;
             if (self.checked and end > self.bytes.len) return error.NotEnoughBytes;
             const out = self.bytes[self.pos..end];
             self.pos = end;
@@ -663,6 +663,8 @@ pub fn Converter(comptime T: type) type {
     return struct {
         pub const Type = T;
         pub const alignment = maxAlignmentOf(T);
+        /// A wrapper around untrusted data.
+        /// Bound checks are done on every access
         pub const Untrusted = struct {
             bytes: []const u8,
             view: View(T, false),
@@ -779,12 +781,20 @@ pub fn Converter(comptime T: type) type {
                 gpa.free(self.memory);
             }
 
+            /// Create an untrusted wrapper around the data; bound checks are done on every access
             pub fn untrusted(self: @This()) Untrusted {
                 return Untrusted.init(self.memory);
             }
 
+            /// Assume that all the pointers do infact point to in-bounds memory.
+            /// DANGER: ONLY CALL THIS ON DATA YOU TRUST
             pub fn trustedUnchecked(self: @This()) Trusted {
                 return Trusted.init(self.memory);
+            }
+
+            /// Do bounds checking and Converter to trusted
+            pub fn validate(self: @This()) !Trusted {
+                self.untrusted().validate();
             }
         };
 
