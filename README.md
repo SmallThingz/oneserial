@@ -1,0 +1,140 @@
+# OneSerial: Typed Single-Buffer Serialization For Zig
+
+Serialize supported Zig values into one contiguous byte buffer, then read them through checked or unchecked typed views.
+
+This is useful when you want:
+- Compact binary snapshots of nested data.
+- Fast field/slice access without fully decoding everything.
+- A clear trust boundary (`Untrusted` -> `validate()` -> `Trusted`).
+
+> [!WARNING]
+> **Experimental:** API and wire details may change.<br/>
+> **Trust model:** Always treat incoming bytes as untrusted until validated.<br/>
+> **Portability:** Wire format uses native type representation (for example endianness and tag layout), so cross-platform compatibility is limited unless environments match.
+
+## Why OneSerial?
+
+Many serializers force full decoding before you can inspect anything. `oneserial` gives you typed views so you can:
+- Validate once.
+- Traverse fields/slices directly from the byte buffer.
+- Decode to owned memory only when needed.
+
+## Quick Start
+
+```zig
+const std = @import("std");
+const oneserial = @import("oneserial");
+
+const Msg = struct {
+    id: u64,
+    user: struct {
+        name: []const u8,
+        level: u8,
+    },
+    tags: []const []const u8,
+    maybe_ptr: ?*const u32,
+    payload: union(enum) {
+        text: []const u8,
+        code: u16,
+        none: void,
+    },
+    result: error{Offline}![]const u8,
+};
+
+pub fn main() !void {
+    const gpa = std.heap.page_allocator;
+
+    var n: u32 = 7;
+    const msg = Msg{
+        .id = 42,
+        .user = .{ .name = "zig", .level = 3 },
+        .tags = &.{ "alpha", "beta", "gamma" },
+        .maybe_ptr = &n,
+        .payload = .{ .text = "hello" },
+        .result = "ok",
+    };
+
+    var wrapper = try oneserial.Wrapper(Msg, .{}).init(&msg, gpa);
+    defer wrapper.deinit(gpa);
+
+    // Validate once, then use trusted typed views.
+    const trusted = try wrapper.untrusted().validate();
+
+    const id = trusted.field("id").value();
+    const tags = trusted.field("tags");
+
+    std.debug.print("id={d}, tags={d}\n", .{ id, tags.len() });
+}
+```
+
+## Installation
+
+1. Add dependency in `build.zig.zon`:
+
+```zig
+.dependencies = .{
+    .oneserial = .{
+        .url = "git+https://github.com/SmallThingz/oneserial#<commit>",
+        .hash = "<hash>",
+    },
+},
+```
+
+2. Add module import in `build.zig`:
+
+```zig
+const dep = b.dependency("oneserial", .{
+    .target = target,
+    .optimize = optimize,
+});
+exe.root_module.addImport("oneserial", dep.module("oneserial"));
+```
+
+## Core API
+
+- `oneserial.Converter(T, .{})`
+  - Entry point for per-type operations.
+- `oneserial.serializeAlloc(T, .{}, &value, allocator)`
+  - Serialize value into one aligned byte buffer.
+- `oneserial.Wrapper(T, .{})`
+  - Owns serialized bytes and provides `.untrusted()`.
+- `oneserial.Untrusted(T, .{})`
+  - Checked access. Call `.validate()` for full-buffer validation.
+- `oneserial.Trusted(T, .{})`
+  - Assumes bytes are valid; cheaper typed access.
+
+### View Accessors
+
+Available on `Untrusted`, `Trusted`, and nested views as type-appropriate:
+- `.field("name")` for structs
+- `.get()` for dynamic values
+- `.len()` / `.at(i)` / `.atUnchecked(i)` for slices
+- `.value()` to decode the current view value
+- `.toOwned(allocator)` to allocate and decode owned value
+
+## Supported Types
+
+- Primitives: `void`, `bool`, integers, floats, vectors, `null`
+- Containers: arrays, structs, tagged unions, optionals, error unions
+- Indirection: `*T` (one pointers) and `[]T` (slices)
+- Enums
+
+## Not Supported
+
+- `[*]T` and `[*c]T`
+- Untagged unions
+- `type`, `noreturn`, comptime-only value types, `opaque`, standalone `error_set`, function/frame types
+
+## Limitations
+
+1. Recursive **types** are supported, but recursive **cyclic data** is not. Cycles can recurse forever.
+2. This format is intentionally low-level and destructive: it prioritizes speed and simple traversal over schema evolution guarantees.
+3. `Trusted` access should only be used after validation or in already-trusted contexts.
+
+## Development
+
+Run tests:
+
+```bash
+zig build test
+```
