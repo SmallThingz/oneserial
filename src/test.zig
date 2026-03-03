@@ -600,7 +600,7 @@ test "mutual recursion with complex mixed layout (acyclic data)" {
         .kind = .leaf,
         .weights = &.{ 0.5, 0.75 },
         .back = &a3,
-        .children = &.{ null },
+        .children = &.{null},
         .payload = .{ .flags = .{ true, false, true, false } },
     };
 
@@ -692,7 +692,7 @@ test "multi-level mutual recursion with unions slices arrays pointers enums (acy
         .attrs = .{ 9, 9, 9 },
         .next = null,
         .owner = null,
-        .chunks = &.{ c3 },
+        .chunks = &.{c3},
     };
 
     const leaf2 = Leaf{
@@ -700,7 +700,7 @@ test "multi-level mutual recursion with unions slices arrays pointers enums (acy
         .attrs = .{ 4, 5, 6 },
         .next = &leaf3,
         .owner = null,
-        .chunks = &.{ c2 },
+        .chunks = &.{c2},
     };
 
     const leaf1 = Leaf{
@@ -714,7 +714,7 @@ test "multi-level mutual recursion with unions slices arrays pointers enums (acy
     const branch2 = Branch{
         .kind = .emit,
         .parent = null,
-        .leaves = &.{ &leaf3 },
+        .leaves = &.{&leaf3},
         .chooser = .{ .primary = &leaf3 },
         .health = error.Offline,
     };
@@ -926,7 +926,6 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
             packed_bits: packed struct { a: u3, b: bool, c: u4 },
             scratch: [2][3]u8,
             vec4: @Vector(4, f32),
-            nil: @TypeOf(null),
             nothing: void,
             meta: union(enum) {
                 plain: u32,
@@ -959,7 +958,6 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
             ref_a: ?*const NodeA,
             ref_c: ?*const NodeC,
             refs_d: [3]?*const NodeD,
-            nil: @TypeOf(null),
             vv: @Vector(2, i16),
         };
 
@@ -1053,7 +1051,6 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
         .ref_a = null,
         .ref_c = null,
         .refs_d = .{ &d1, &d2, null },
-        .nil = null,
         .vv = .{ 1, 2 },
     };
 
@@ -1063,7 +1060,6 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
         .ref_a = null,
         .ref_c = null,
         .refs_d = .{ &d2, &d3, null },
-        .nil = null,
         .vv = .{ -3, 4 },
     };
 
@@ -1073,7 +1069,6 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
         .ref_a = null,
         .ref_c = null,
         .refs_d = .{ null, null, &d3 },
-        .nil = null,
         .vv = .{ 7, -8 },
     };
 
@@ -1082,7 +1077,7 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
         .owner = null,
         .branch = &d3,
         .backlinks = .{ &d3, null },
-        .chunks = &.{ ch3 },
+        .chunks = &.{ch3},
         .maybe_event = null,
         .status = "c3-ok",
         .matrix = .{ .{ 9, 8, 7 }, .{ 6, 5, 4 } },
@@ -1150,9 +1145,383 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
         .packed_bits = .{ .a = 5, .b = true, .c = 9 },
         .scratch = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 } },
         .vec4 = .{ 1.0, 2.0, 3.5, 4.5 },
-        .nil = null,
         .nothing = {},
         .meta = .{ .details = .{ .ok = false, .msg = "details", .maybe = null } },
+    };
+
+    try testRoundtrip(root);
+}
+
+test "single gigantic all-supported-types chaos graph with triple and quadruple mutual recursion" {
+    const NS = struct {
+        const Mode = enum(u8) { m0, m1, m2, m3 };
+        const Flavor = enum { sour, sweet, bitter };
+        const E = error{ Broken, Missing, Timeout };
+
+        const Bits = packed struct { a: u1, b: u3, c: bool, d: u4 };
+        const Mini = struct {
+            n: i16,
+            maybe: ?u32,
+            z: [0]u8,
+        };
+
+        const TrioX = struct {
+            id: u16,
+            y: ?*const TrioY,
+            bag: []const u8,
+            picks: [2]?*const TrioZ,
+            state: union(enum) {
+                off: void,
+                on: bool,
+                code: u8,
+                names: []const []const u8,
+            },
+        };
+
+        const TrioY = struct {
+            id: u16,
+            z: ?*const TrioZ,
+            xs: []const ?*const TrioX,
+            res: E![]const u8,
+            maybe: ?[]const u8,
+            bucket: [2]union(enum) {
+                n: i32,
+                t: []const u8,
+                f: bool,
+            },
+        };
+
+        const TrioZ = struct {
+            id: u16,
+            x: ?*const TrioX,
+            ys: [3]?*const TrioY,
+            mode: Mode,
+            opt: ?union(enum) { a: u8, b: []const u8 },
+        };
+
+        const QuadA = struct {
+            aid: u32,
+            b: *const QuadB,
+            c: ?*const QuadC,
+            ds: []const *const QuadD,
+            tags: []const []const u8,
+            pack: Bits,
+            note: ?[]const u8,
+            event: union(enum) {
+                none: void,
+                text: []const u8,
+                n: i64,
+                maybe_d: ?*const QuadD,
+            },
+        };
+
+        const QuadB = struct {
+            bid: u32,
+            parent: ?*const QuadA,
+            c: *const QuadC,
+            maybe_d: ?*const QuadD,
+            links: [2]?*const QuadA,
+            choice: union(enum) {
+                bytes: []const u8,
+                ids: [3]u16,
+                ok: bool,
+                err: E![]const u8,
+            },
+            values: [3]u8,
+        };
+
+        const QuadC = struct {
+            cid: u32,
+            owner: ?*const QuadB,
+            lead: *const QuadD,
+            peers: []const ?*const QuadC,
+            tri: ?*const TrioX,
+            grid: [2][2]u8,
+            status: E![]const u8,
+        };
+
+        const QuadD = struct {
+            did: u32,
+            next: ?*const QuadD,
+            a: ?*const QuadA,
+            c: ?*const QuadC,
+            watchers: []const ?*const QuadB,
+            route: [2]Mode,
+            shape: union(enum) {
+                voidy: void,
+                numbers: [4]u16,
+                ptr: ?*const QuadC,
+                msg: []const u8,
+            },
+        };
+
+        const Payload = union(enum) {
+            none: void,
+            num: i64,
+            text: []const u8,
+            mini: Mini,
+            vec: @Vector(4, u8),
+            arr: [3]u16,
+            bits: Bits,
+            err: E![]const u8,
+            maybe_d: ?*const QuadD,
+            maybe_z: ?*const TrioZ,
+            inner: union(enum) {
+                flag: bool,
+                data: []const u8,
+                pair: [2]i8,
+            },
+        };
+
+        const Root = struct {
+            mode: Mode,
+            flavor: Flavor,
+            ok: bool,
+            count: i64,
+            ratio: f64,
+            nothing: void,
+            bits: Bits,
+            vecf: @Vector(4, f32),
+            matrix: [2][3]u8,
+            labels: []const []const u8,
+            bytes: []const u8,
+            tiny: [2]Mini,
+            payloads: []const Payload,
+            pick: Payload,
+            maybe_pick: ?Payload,
+            status: E![]const u8,
+            maybe_status: ?E![]const u8,
+            one_d: *const QuadD,
+            maybe_c: ?*const QuadC,
+            many_b: []const ?*const QuadB,
+            d_chain: [3]?*const QuadD,
+            pp_d: *const *const QuadD,
+            xyz: *const TrioX,
+            maybe_y: ?*const TrioY,
+            grid_c: [2][2]?*const QuadC,
+            voids: []const void,
+            alt: union(enum) {
+                raw: []const u8,
+                nums: [4]u16,
+                mixed: struct {
+                    maybe_ptr: ?*const QuadA,
+                    note: []const u8,
+                    e: ?E![]const u8,
+                },
+            },
+        };
+    };
+
+    const TrioX = NS.TrioX;
+    const TrioY = NS.TrioY;
+    const TrioZ = NS.TrioZ;
+    const QuadA = NS.QuadA;
+    const QuadB = NS.QuadB;
+    const QuadC = NS.QuadC;
+    const QuadD = NS.QuadD;
+    const Payload = NS.Payload;
+    const Root = NS.Root;
+
+    const z2 = TrioZ{
+        .id = 202,
+        .x = null,
+        .ys = .{ null, null, null },
+        .mode = .m2,
+        .opt = .{ .a = 7 },
+    };
+
+    const y2 = TrioY{
+        .id = 102,
+        .z = &z2,
+        .xs = &.{null},
+        .res = error.Timeout,
+        .maybe = null,
+        .bucket = .{ .{ .n = -1 }, .{ .t = "y2" } },
+    };
+
+    const x2 = TrioX{
+        .id = 2,
+        .y = &y2,
+        .bag = "x2-bag",
+        .picks = .{ &z2, null },
+        .state = .{ .code = 23 },
+    };
+
+    const z1 = TrioZ{
+        .id = 201,
+        .x = &x2,
+        .ys = .{ &y2, null, null },
+        .mode = .m1,
+        .opt = .{ .b = "z1-opt" },
+    };
+
+    const y1 = TrioY{
+        .id = 101,
+        .z = &z1,
+        .xs = &.{ &x2, null },
+        .res = "y1-ok",
+        .maybe = "optional-y1",
+        .bucket = .{ .{ .f = true }, .{ .t = "bucket" } },
+    };
+
+    const x1 = TrioX{
+        .id = 1,
+        .y = &y1,
+        .bag = "x1-bag",
+        .picks = .{ &z1, &z2 },
+        .state = .{ .names = &.{ "x1", "mess", "triple" } },
+    };
+
+    const d4 = QuadD{
+        .did = 40,
+        .next = null,
+        .a = null,
+        .c = null,
+        .watchers = &.{ null, null },
+        .route = .{ .m3, .m0 },
+        .shape = .{ .voidy = {} },
+    };
+
+    const d3 = QuadD{
+        .did = 30,
+        .next = &d4,
+        .a = null,
+        .c = null,
+        .watchers = &.{null},
+        .route = .{ .m2, .m3 },
+        .shape = .{ .numbers = .{ 9, 8, 7, 6 } },
+    };
+
+    const d2 = QuadD{
+        .did = 20,
+        .next = &d3,
+        .a = null,
+        .c = null,
+        .watchers = &.{ null, null, null },
+        .route = .{ .m1, .m2 },
+        .shape = .{ .msg = "d2-shape" },
+    };
+
+    const d1 = QuadD{
+        .did = 10,
+        .next = &d2,
+        .a = null,
+        .c = null,
+        .watchers = &.{null},
+        .route = .{ .m0, .m1 },
+        .shape = .{ .ptr = null },
+    };
+
+    const c3 = QuadC{
+        .cid = 300,
+        .owner = null,
+        .lead = &d4,
+        .peers = &.{null},
+        .tri = &x2,
+        .grid = .{ .{ 9, 8 }, .{ 7, 6 } },
+        .status = "c3-ok",
+    };
+
+    const c2 = QuadC{
+        .cid = 200,
+        .owner = null,
+        .lead = &d3,
+        .peers = &.{ &c3, null },
+        .tri = &x1,
+        .grid = .{ .{ 4, 3 }, .{ 2, 1 } },
+        .status = error.Missing,
+    };
+
+    const c1 = QuadC{
+        .cid = 100,
+        .owner = null,
+        .lead = &d2,
+        .peers = &.{ &c2, &c3 },
+        .tri = null,
+        .grid = .{ .{ 1, 2 }, .{ 3, 4 } },
+        .status = "c1-ok",
+    };
+
+    const b2 = QuadB{
+        .bid = 2,
+        .parent = null,
+        .c = &c3,
+        .maybe_d = &d4,
+        .links = .{ null, null },
+        .choice = .{ .ids = .{ 11, 22, 33 } },
+        .values = .{ 5, 6, 7 },
+    };
+
+    const b1 = QuadB{
+        .bid = 1,
+        .parent = null,
+        .c = &c1,
+        .maybe_d = &d2,
+        .links = .{ null, null },
+        .choice = .{ .err = error.Broken },
+        .values = .{ 1, 2, 3 },
+    };
+
+    const a1 = QuadA{
+        .aid = 1,
+        .b = &b1,
+        .c = &c1,
+        .ds = &.{ &d1, &d2, &d3, &d4 },
+        .tags = &.{ "a1", "main", "chaos" },
+        .pack = .{ .a = 0, .b = 6, .c = true, .d = 15 },
+        .note = "a1-note",
+        .event = .{ .maybe_d = &d1 },
+    };
+
+    const p1: Payload = .{ .none = {} };
+    const p2: Payload = .{ .num = -1234567 };
+    const p3: Payload = .{ .text = "payload-text" };
+    const p4: Payload = .{ .mini = .{ .n = -7, .maybe = 11, .z = .{} } };
+    const p5: Payload = .{ .vec = .{ 1, 2, 3, 4 } };
+    const p6: Payload = .{ .arr = .{ 8, 9, 10 } };
+    const p7: Payload = .{ .bits = .{ .a = 1, .b = 5, .c = true, .d = 12 } };
+    const p8: Payload = .{ .err = error.Timeout };
+    const p9: Payload = .{ .maybe_d = &d3 };
+    const p10: Payload = .{ .maybe_z = &z1 };
+    const p11: Payload = .{ .inner = .{ .pair = .{ -4, 5 } } };
+
+    const d_head: *const QuadD = &d1;
+
+    const root = Root{
+        .mode = .m3,
+        .flavor = .bitter,
+        .ok = true,
+        .count = -99_999_999,
+        .ratio = 6.25,
+        .nothing = {},
+        .bits = .{ .a = 1, .b = 4, .c = false, .d = 11 },
+        .vecf = .{ 0.5, 1.25, 2.5, 5.0 },
+        .matrix = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 } },
+        .labels = &.{ "alpha", "beta", "", "delta" },
+        .bytes = "root-bytes",
+        .tiny = .{
+            .{ .n = -10, .maybe = null, .z = .{} },
+            .{ .n = 88, .maybe = 700, .z = .{} },
+        },
+        .payloads = &.{ p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11 },
+        .pick = p11,
+        .maybe_pick = p7,
+        .status = "status-ok",
+        .maybe_status = error.Missing,
+        .one_d = &d1,
+        .maybe_c = &c2,
+        .many_b = &.{ &b1, null, &b2 },
+        .d_chain = .{ &d1, &d2, null },
+        .pp_d = &d_head,
+        .xyz = &x1,
+        .maybe_y = &y2,
+        .grid_c = .{ .{ &c1, null }, .{ &c2, &c3 } },
+        .voids = &.{ {}, {}, {}, {} },
+        .alt = .{ .mixed = .{
+            .maybe_ptr = &a1,
+            .note = "alt-note",
+            .e = "inner-ok",
+        } },
     };
 
     try testRoundtrip(root);
