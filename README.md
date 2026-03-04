@@ -103,6 +103,17 @@ exe.root_module.addImport("oneserial", dep.module("oneserial"));
 - `oneserial.Trusted(T, .{})`
   - Assumes bytes are valid; cheaper typed access.
 
+### Endianness
+
+`MergeOptions` has `endian` (default: native). Use it when producing or consuming non-native wire bytes:
+
+```zig
+const opposite: std.builtin.Endian = if (@import("builtin").target.cpu.arch.endian() == .little) .big else .little;
+const bytes = try oneserial.serializeAlloc(MyType, .{ .endian = opposite }, &value, allocator);
+const u = oneserial.Untrusted(MyType, .{}).init(bytes).withEndian(opposite);
+const trusted = try u.validate();
+```
+
 ### View Accessors
 
 Available on `Untrusted`, `Trusted`, and nested views as type-appropriate:

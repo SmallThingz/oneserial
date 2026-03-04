@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const one = @import("root.zig");
 const testing = std.testing;
 
@@ -1613,6 +1614,62 @@ test "null type roundtrip" {
 
     const untrusted = one.Untrusted(NullT, .{}).init(bytes);
     _ = try untrusted.validate();
+}
+
+test "opposite-endian wire roundtrip" {
+    const opposite: std.builtin.Endian = comptime if (builtin.target.cpu.arch.endian() == .little) .big else .little;
+
+    const T = struct {
+        id: u32,
+        values: []const u16,
+        mode: enum(u16) { a = 1, b = 2, c = 3 },
+        payload: union(enum) { text: []const u8, count: u32 },
+        result: error{Oops}!u64,
+        vec: @Vector(4, u16),
+    };
+
+    const value = T{
+        .id = 0x12_34_56_78,
+        .values = &.{ 10, 20, 30, 40 },
+        .mode = .c,
+        .payload = .{ .text = "wire" },
+        .result = 0x11_22_33_44_55_66_77_88,
+        .vec = .{ 1, 2, 3, 4 },
+    };
+
+    const bytes = try one.serializeAlloc(T, .{ .endian = opposite }, &value, testing.allocator);
+    defer testing.allocator.free(bytes);
+
+    const untrusted = one.Untrusted(T, .{ .endian = opposite }).init(bytes);
+    const trusted = try untrusted.validate();
+    const out = try trusted.toOwned(testing.allocator);
+    defer freeOwned(T, testing.allocator, @constCast(&out));
+    try expectEquivalent(value, out);
+}
+
+test "view endianness can be switched on-the-fly" {
+    const opposite: std.builtin.Endian = comptime if (builtin.target.cpu.arch.endian() == .little) .big else .little;
+    const T = struct {
+        data: []const u8,
+        tail: u16,
+    };
+
+    const value = T{ .data = "x", .tail = 0x1234 };
+    const bytes = try one.serializeAlloc(T, .{ .endian = opposite }, &value, testing.allocator);
+    defer testing.allocator.free(bytes);
+
+    const wrong = one.Untrusted(T, .{}).init(bytes);
+    const wrong_data = try wrong.field("data");
+    try testing.expectEqual(@as(usize, 16_777_216), try wrong_data.len());
+    try testing.expectError(error.NotEnoughBytes, wrong.validate());
+
+    const fixed = wrong.withEndian(opposite);
+    const fixed_data = try fixed.field("data");
+    try testing.expectEqual(@as(usize, 1), try fixed_data.len());
+
+    const out = try (try fixed.validate()).toOwned(testing.allocator);
+    defer freeOwned(T, testing.allocator, @constCast(&out));
+    try expectEquivalent(value, out);
 }
 
 test {

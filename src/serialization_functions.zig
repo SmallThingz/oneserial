@@ -168,13 +168,34 @@ fn containsDynamic(comptime T: type) bool {
     };
 }
 
+fn maybeSwapPod(comptime T: type, value: T, endian: std.builtin.Endian) T {
+    if (endian == @import("builtin").target.cpu.arch.endian() or @sizeOf(T) <= 1) return value;
+
+    return switch (@typeInfo(T)) {
+        .int => if (@bitSizeOf(T) % 8 == 0) @byteSwap(value) else value,
+        .float => blk: {
+            const Bits = std.meta.Int(.unsigned, @bitSizeOf(T));
+            const bits: Bits = @bitCast(value);
+            break :blk @bitCast(@byteSwap(bits));
+        },
+        .vector => |vi| blk: {
+            if (@sizeOf(vi.child) <= 1 or @bitSizeOf(vi.child) % 8 != 0) break :blk value;
+            var arr: [vi.len]vi.child = @bitCast(value);
+            inline for (0..vi.len) |i| arr[i] = maybeSwapPod(vi.child, arr[i], endian);
+            break :blk @bitCast(arr);
+        },
+        else => value,
+    };
+}
+
 fn Writer() type {
     return struct {
         buffer: ?[]u8,
+        endian: std.builtin.Endian,
         pos: usize = 0,
 
-        fn init(buffer: ?[]u8) @This() {
-            return .{ .buffer = buffer };
+        fn init(buffer: ?[]u8, endian: std.builtin.Endian) @This() {
+            return .{ .buffer = buffer, .endian = endian };
         }
 
         fn alignTo(self: *@This(), comptime alignment: usize) ValidationError!void {
@@ -196,7 +217,7 @@ fn Writer() type {
         }
 
         fn writePod(self: *@This(), comptime T: type, value: T) ValidationError!void {
-            var tmp = value;
+            var tmp = maybeSwapPod(T, value, self.endian);
             try self.alignTo(@alignOf(T));
             try self.writeBytes(std.mem.asBytes(&tmp));
         }
@@ -208,13 +229,14 @@ fn Reader() type {
         bytes: []const u8,
         pos: usize,
         checked: bool,
+        endian: std.builtin.Endian,
 
-        fn init(bytes: []const u8, checked: bool) @This() {
-            return .{ .bytes = bytes, .pos = 0, .checked = checked };
+        fn init(bytes: []const u8, checked: bool, endian: std.builtin.Endian) @This() {
+            return .{ .bytes = bytes, .pos = 0, .checked = checked, .endian = endian };
         }
 
-        fn initAt(bytes: []const u8, start: usize, checked: bool) @This() {
-            return .{ .bytes = bytes, .pos = start, .checked = checked };
+        fn initAt(bytes: []const u8, start: usize, checked: bool, endian: std.builtin.Endian) @This() {
+            return .{ .bytes = bytes, .pos = start, .checked = checked, .endian = endian };
         }
 
         fn alignTo(self: *@This(), comptime alignment: usize) ValidationError!void {
@@ -236,7 +258,7 @@ fn Reader() type {
             const bytes = try self.readBytes(@sizeOf(T));
             var out: T = undefined;
             @memcpy(std.mem.asBytes(&out), bytes);
-            return out;
+            return maybeSwapPod(T, out, self.endian);
         }
     };
 }
@@ -509,8 +531,8 @@ fn fieldTypeByName(comptime S: type, comptime field_name: []const u8) type {
     @compileError("Unknown field '" ++ field_name ++ "' on " ++ @typeName(S));
 }
 
-fn fieldStart(comptime S: type, comptime field_name: []const u8, bytes: []const u8, start: usize, checked: bool) ValidationError!usize {
-    var r = Reader().initAt(bytes, start, checked);
+fn fieldStart(comptime S: type, comptime field_name: []const u8, bytes: []const u8, start: usize, checked: bool, endian: std.builtin.Endian) ValidationError!usize {
+    var r = Reader().initAt(bytes, start, checked, endian);
     const si = @typeInfo(S).@"struct";
     inline for (si.fields) |field| {
         if (comptime std.mem.eql(u8, field.name, field_name)) return r.pos;
@@ -519,16 +541,16 @@ fn fieldStart(comptime S: type, comptime field_name: []const u8, bytes: []const 
     unreachable;
 }
 
-fn sliceLen(comptime SliceT: type, bytes: []const u8, start: usize, checked: bool) ValidationError!usize {
+fn sliceLen(comptime SliceT: type, bytes: []const u8, start: usize, checked: bool, endian: std.builtin.Endian) ValidationError!usize {
     _ = SliceT;
-    var r = Reader().initAt(bytes, start, checked);
+    var r = Reader().initAt(bytes, start, checked, endian);
     const len_size = try r.readPod(root.Size);
     return meta.usizeFromAnyInt(len_size) catch error.LengthOverflow;
 }
 
-fn sliceElementStart(comptime SliceT: type, bytes: []const u8, start: usize, index: usize, checked: bool) ValidationError!usize {
+fn sliceElementStart(comptime SliceT: type, bytes: []const u8, start: usize, index: usize, checked: bool, endian: std.builtin.Endian) ValidationError!usize {
     const pi = @typeInfo(SliceT).pointer;
-    var r = Reader().initAt(bytes, start, checked);
+    var r = Reader().initAt(bytes, start, checked, endian);
     const len_size = try r.readPod(root.Size);
     const len = meta.usizeFromAnyInt(len_size) catch return error.LengthOverflow;
     if (checked and index >= len) return error.OutOfBounds;
@@ -544,17 +566,18 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
     return struct {
         bytes: []const u8,
         start: usize,
+        endian: std.builtin.Endian,
 
         pub fn field(self: @This(), comptime field_name: []const u8) ReturnType(trusted, View(fieldTypeByName(T, field_name), trusted)) {
             if (@typeInfo(T) != .@"struct") {
                 @compileError("field() only exists for struct views, got " ++ @typeName(T));
             }
             if (comptime trusted) {
-                const s = fieldStart(T, field_name, self.bytes, self.start, false) catch unreachable;
-                return .{ .bytes = self.bytes, .start = s };
+                const s = fieldStart(T, field_name, self.bytes, self.start, false, self.endian) catch unreachable;
+                return .{ .bytes = self.bytes, .start = s, .endian = self.endian };
             }
-            const s = fieldStart(T, field_name, self.bytes, self.start, true) catch |err| return toOutOfBounds(err);
-            return .{ .bytes = self.bytes, .start = s };
+            const s = fieldStart(T, field_name, self.bytes, self.start, true, self.endian) catch |err| return toOutOfBounds(err);
+            return .{ .bytes = self.bytes, .start = s, .endian = self.endian };
         }
 
         pub fn get(self: @This()) ReturnType(trusted, blk: {
@@ -568,15 +591,15 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
                 .pointer => |pi| switch (pi.size) {
                     .one => {
                         if (comptime trusted) {
-                            return .{ .bytes = self.bytes, .start = self.start };
+                            return .{ .bytes = self.bytes, .start = self.start, .endian = self.endian };
                         }
-                        var r = Reader().initAt(self.bytes, self.start, true);
+                        var r = Reader().initAt(self.bytes, self.start, true, self.endian);
                         skipValue(pi.child, &r) catch |err| return toOutOfBounds(err);
-                        return .{ .bytes = self.bytes, .start = self.start };
+                        return .{ .bytes = self.bytes, .start = self.start, .endian = self.endian };
                     },
                     .slice => {
                         if (comptime trusted) return self;
-                        var r = Reader().initAt(self.bytes, self.start, true);
+                        var r = Reader().initAt(self.bytes, self.start, true, self.endian);
                         skipValue(T, &r) catch |err| return toOutOfBounds(err);
                         return self;
                     },
@@ -587,7 +610,7 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
                         @compileError("get() is only available for dynamic values, got " ++ @typeName(T));
                     }
                     if (comptime trusted) return self;
-                    var r = Reader().initAt(self.bytes, self.start, true);
+                    var r = Reader().initAt(self.bytes, self.start, true, self.endian);
                     skipValue(T, &r) catch |err| return toOutOfBounds(err);
                     return self;
                 },
@@ -600,9 +623,9 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
                 @compileError("len() is only available on slice views, got " ++ @typeName(T));
             }
             if (comptime trusted) {
-                return sliceLen(T, self.bytes, self.start, false) catch unreachable;
+                return sliceLen(T, self.bytes, self.start, false, self.endian) catch unreachable;
             }
-            return sliceLen(T, self.bytes, self.start, true) catch |err| return toOutOfBounds(err);
+            return sliceLen(T, self.bytes, self.start, true, self.endian) catch |err| return toOutOfBounds(err);
         }
 
         pub fn at(self: @This(), index: usize) ReturnType(trusted, View(@typeInfo(T).pointer.child, trusted)) {
@@ -611,11 +634,11 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
                 @compileError("at() is only available on slice views, got " ++ @typeName(T));
             }
             if (comptime trusted) {
-                const s = sliceElementStart(T, self.bytes, self.start, index, false) catch unreachable;
-                return .{ .bytes = self.bytes, .start = s };
+                const s = sliceElementStart(T, self.bytes, self.start, index, false, self.endian) catch unreachable;
+                return .{ .bytes = self.bytes, .start = s, .endian = self.endian };
             }
-            const s = sliceElementStart(T, self.bytes, self.start, index, true) catch |err| return toOutOfBounds(err);
-            return .{ .bytes = self.bytes, .start = s };
+            const s = sliceElementStart(T, self.bytes, self.start, index, true, self.endian) catch |err| return toOutOfBounds(err);
+            return .{ .bytes = self.bytes, .start = s, .endian = self.endian };
         }
 
         pub fn atUnchecked(self: @This(), index: usize) View(@typeInfo(T).pointer.child, trusted) {
@@ -623,12 +646,18 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
             if (ti != .pointer or ti.pointer.size != .slice) {
                 @compileError("atUnchecked() is only available on slice views, got " ++ @typeName(T));
             }
-            const s = sliceElementStart(T, self.bytes, self.start, index, false) catch unreachable;
-            return .{ .bytes = self.bytes, .start = s };
+            const s = sliceElementStart(T, self.bytes, self.start, index, false, self.endian) catch unreachable;
+            return .{ .bytes = self.bytes, .start = s, .endian = self.endian };
+        }
+
+        pub fn withEndian(self: @This(), endian: std.builtin.Endian) @This() {
+            var out = self;
+            out.endian = endian;
+            return out;
         }
 
         pub fn value(self: @This()) ReturnType(trusted, T) {
-            var r = Reader().initAt(self.bytes, self.start, !trusted);
+            var r = Reader().initAt(self.bytes, self.start, !trusted, self.endian);
             const decoded = decodeValue(T, &r, std.heap.page_allocator) catch |err| {
                 if (comptime trusted) unreachable;
                 return toOutOfBounds(err);
@@ -638,7 +667,7 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
         }
 
         pub fn toOwned(self: @This(), gpa: std.mem.Allocator) DeserializeError!T {
-            var r = Reader().initAt(self.bytes, self.start, !trusted);
+            var r = Reader().initAt(self.bytes, self.start, !trusted, self.endian);
             const decoded = try decodeValue(T, &r, gpa);
             const out: T = returnDecoded(T, decoded);
             return out;
@@ -646,20 +675,20 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
     };
 }
 
-fn validateExact(comptime T: type, bytes: []const u8) ValidationError!void {
-    var r = Reader().init(bytes, true);
+fn validateExact(comptime T: type, bytes: []const u8, endian: std.builtin.Endian) ValidationError!void {
+    var r = Reader().init(bytes, true, endian);
     try skipValue(T, &r);
     if (r.pos != bytes.len) return error.TooManyBytes;
 }
 
-fn decodeRootExact(comptime T: type, bytes: []const u8, checked: bool, gpa: std.mem.Allocator) DeserializeError!Decoded(T) {
-    var r = Reader().init(bytes, checked);
+fn decodeRootExact(comptime T: type, bytes: []const u8, checked: bool, endian: std.builtin.Endian, gpa: std.mem.Allocator) DeserializeError!Decoded(T) {
+    var r = Reader().init(bytes, checked, endian);
     const out = try decodeValue(T, &r, gpa);
     if (checked and r.pos != bytes.len) return error.TooManyBytes;
     return out;
 }
 
-pub fn Converter(comptime T: type) type {
+pub fn Converter(comptime T: type, comptime default_endian: std.builtin.Endian) type {
     return struct {
         pub const Type = T;
         pub const alignment = maxAlignmentOf(T);
@@ -667,26 +696,35 @@ pub fn Converter(comptime T: type) type {
         /// Bound checks are done on every access
         pub const Untrusted = struct {
             bytes: []const u8,
+            endian: std.builtin.Endian,
             view: View(T, false),
 
             pub fn init(bytes: []const u8) @This() {
                 return .{
                     .bytes = bytes,
-                    .view = .{ .bytes = bytes, .start = 0 },
+                    .endian = default_endian,
+                    .view = .{ .bytes = bytes, .start = 0, .endian = default_endian },
                 };
             }
 
+            pub fn withEndian(self: @This(), endian: std.builtin.Endian) @This() {
+                var out = self;
+                out.endian = endian;
+                out.view.endian = endian;
+                return out;
+            }
+
             pub fn validate(self: @This()) ValidationError!Trusted {
-                try validateExact(T, self.bytes);
-                return Trusted.init(self.bytes);
+                try validateExact(T, self.bytes, self.endian);
+                return Trusted.initWithEndian(self.bytes, self.endian);
             }
 
             pub fn unsafeTrusted(self: @This()) Trusted {
-                return Trusted.init(self.bytes);
+                return Trusted.initWithEndian(self.bytes, self.endian);
             }
 
             pub fn toOwned(self: @This(), gpa: std.mem.Allocator) DeserializeError!T {
-                const decoded = try decodeRootExact(T, self.bytes, true, gpa);
+                const decoded = try decodeRootExact(T, self.bytes, true, self.endian, gpa);
                 const out: T = returnDecoded(T, decoded);
                 return out;
             }
@@ -724,17 +762,33 @@ pub fn Converter(comptime T: type) type {
 
         pub const Trusted = struct {
             bytes: []const u8,
+            endian: std.builtin.Endian,
             view: View(T, true),
 
             pub fn init(bytes: []const u8) @This() {
                 return .{
                     .bytes = bytes,
-                    .view = .{ .bytes = bytes, .start = 0 },
+                    .endian = default_endian,
+                    .view = .{ .bytes = bytes, .start = 0, .endian = default_endian },
                 };
             }
 
+            fn initWithEndian(bytes: []const u8, endian: std.builtin.Endian) @This() {
+                var out = init(bytes);
+                out.endian = endian;
+                out.view.endian = endian;
+                return out;
+            }
+
+            pub fn withEndian(self: @This(), endian: std.builtin.Endian) @This() {
+                var out = self;
+                out.endian = endian;
+                out.view.endian = endian;
+                return out;
+            }
+
             pub fn toOwned(self: @This(), gpa: std.mem.Allocator) DeserializeError!T {
-                const decoded = try decodeRootExact(T, self.bytes, false, gpa);
+                const decoded = try decodeRootExact(T, self.bytes, false, self.endian, gpa);
                 const out: T = returnDecoded(T, decoded);
                 return out;
             }
@@ -799,7 +853,7 @@ pub fn Converter(comptime T: type) type {
         };
 
         pub fn serializedSize(value: *const T) ValidationError!usize {
-            var w = Writer().init(null);
+            var w = Writer().init(null, default_endian);
             try serializeValue(T, &w, value);
             return w.pos;
         }
@@ -808,7 +862,7 @@ pub fn Converter(comptime T: type) type {
             const size = try serializedSize(value);
             const bytes = try gpa.alignedAlloc(u8, alignment, size);
             errdefer gpa.free(bytes);
-            var w = Writer().init(bytes);
+            var w = Writer().init(bytes, default_endian);
             try serializeValue(T, &w, value);
             if (w.pos != size) return error.NoSpaceLeft;
             return bytes;
