@@ -11,7 +11,7 @@ pub fn alignBackward(pos: usize, comptime alignment: usize) MathError!usize {
 /// Aligns `pos` up to the nearest multiple of `alignment`.
 pub fn alignForward(pos: usize, comptime alignment: usize) MathError!usize {
     comptime std.debug.assert(std.mem.isValidAlignGeneric(usize, alignment));
-    return std.math.add(usize, pos, ((alignment - 1) & ~pos) + 1);
+    return std.math.add(usize, pos, ((alignment - 1) & ~pos) + @intFromBool(alignment != 1));
 }
 
 /// Converts an integer-like value to `usize` with overflow checking.

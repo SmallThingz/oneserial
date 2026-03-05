@@ -935,7 +935,7 @@ test "invalid error-union code is rejected by validate and toOwned" {
 }
 
 test "meta.alignForward reports overflow" {
-    try testing.expectError(error.LengthOverflow, meta.alignForward(std.math.maxInt(usize), 8));
+    try testing.expectError(error.Overflow, meta.alignForward(std.math.maxInt(usize), 8));
 }
 
 test "toOwned does not leak on induced OutOfMemory" {
