@@ -1,6 +1,7 @@
 const std = @import("std");
 const meta = @import("meta.zig");
 const root = @import("root.zig");
+const shim_allocation = @import("shim_allocation.zig");
 
 pub const ValidationError = error{
     NotEnoughBytes,
@@ -168,6 +169,34 @@ fn containsDynamic(comptime T: type) bool {
         },
         else => false,
     };
+}
+
+fn pointerSentinelInt(comptime P: type) usize {
+    const ti = @typeInfo(P);
+    if (ti != .pointer) {
+        @compileError("invalidPointer() expects a pointer type, got " ++ @typeName(P));
+    }
+    if (ti.pointer.size == .slice) {
+        @compileError("invalidPointer() does not accept slice types directly; pass the pointer type used by the slice `.ptr` field.");
+    }
+    const pointer_alignment = if (ti.pointer.alignment == 0) @alignOf(ti.pointer.child) else ti.pointer.alignment;
+    const sentinel_alignment = @max(pointer_alignment, maxAlignmentOf(ti.pointer.child).toByteUnits());
+    return std.math.maxInt(usize) & ~(sentinel_alignment - 1);
+}
+
+/// Returns a pointer sentinel value that is reserved for shim-based shape allocation.
+/// Passing this pointer in a shim signals "allocate container, do not recurse through pointee data".
+pub fn invalidPointer(comptime P: type) P {
+    return @ptrFromInt(pointerSentinelInt(P));
+}
+
+fn isInvalidPointer(ptr: anytype) bool {
+    const P = @TypeOf(ptr);
+    return @intFromPtr(ptr) == pointerSentinelInt(P);
+}
+
+fn allocFromShimValue(comptime T: type, shim: *const T, gpa: std.mem.Allocator) error{OutOfMemory}!T {
+    return shim_allocation.allocFromShimValue(T, shim, gpa, isInvalidPointer);
 }
 
 fn maybeSwapPod(comptime T: type, value: T, endian: std.builtin.Endian) T {
@@ -920,6 +949,12 @@ pub fn Converter(comptime T: type, comptime default_endian: std.builtin.Endian) 
             var w = Writer().init(null, default_endian);
             try serializeValue(T, &w, value);
             return w.pos;
+        }
+
+        /// Allocates an owned shape from `shim` without copying payload bytes.
+        /// Pointer sentinels from `invalidPointer()` stop deep recursion for that subtree.
+        pub fn allocFromShim(shim: *const T, gpa: std.mem.Allocator) error{OutOfMemory}!T {
+            return allocFromShimValue(T, shim, gpa);
         }
 
         /// Serializes `value` into a newly allocated byte buffer.

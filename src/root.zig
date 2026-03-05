@@ -16,6 +16,12 @@ pub const ValidationError = SerializationFunctions.ValidationError;
 pub const SerializeError = SerializationFunctions.SerializeError;
 pub const DeserializeError = SerializationFunctions.DeserializeError;
 
+/// Returns a sentinel pointer used by shim allocation.
+/// Use this for pointer fields (or slice `.ptr`) when you want allocation without deep recursion.
+pub fn invalidPointer(comptime P: type) P {
+    return SerializationFunctions.invalidPointer(P);
+}
+
 /// Returns the per-type converter namespace for `T` and the selected options.
 pub fn Converter(comptime T: type, comptime options: MergeOptions) type {
     return SerializationFunctions.Converter(T, options.endian);
@@ -44,6 +50,17 @@ pub fn serializeAlloc(
     gpa: std.mem.Allocator,
 ) SerializeError!SerializationFunctions.SerializeBytes(T) {
     return Converter(T, options).serializeAlloc(value, gpa);
+}
+
+/// Allocates an owned shape from `shim` without copying payload bytes.
+/// Pointer sentinels from `invalidPointer()` stop deep recursion for that subtree.
+pub fn allocFromShim(
+    comptime T: type,
+    comptime options: MergeOptions,
+    shim: *const T,
+    gpa: std.mem.Allocator,
+) error{OutOfMemory}!T {
+    return Converter(T, options).allocFromShim(shim, gpa);
 }
 
 test {

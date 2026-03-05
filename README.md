@@ -96,6 +96,10 @@ exe.root_module.addImport("oneserial", dep.module("oneserial"));
   - Entry point for per-type operations.
 - `oneserial.serializeAlloc(T, .{}, &value, allocator)`
   - Serialize value into one aligned byte buffer.
+- `oneserial.allocFromShim(T, .{}, &shim, allocator)`
+  - Allocate dynamic shape from a shim value without copying payload bytes.
+- `oneserial.invalidPointer(P)`
+  - Pointer sentinel for shim fields where recursion should stop.
 - `oneserial.Wrapper(T, .{})`
   - Owns serialized bytes and provides `.untrusted()`.
 - `oneserial.Untrusted(T, .{})`
@@ -113,6 +117,47 @@ const bytes = try oneserial.serializeAlloc(MyType, .{ .endian = opposite }, &val
 const u = oneserial.Untrusted(MyType, .{}).init(bytes).withEndian(opposite);
 const trusted = try u.validate();
 ```
+
+### Shim Allocation
+
+`allocFromShim` is useful when you only know allocation shape (lengths/presence/tag) and want to fill payload bytes later.
+
+```zig
+const T = struct {
+    a: []const u8,
+    b: []const u8,
+};
+
+const s = oneserial.invalidPointer([*]const u8);
+const shim = T{
+    .a = s[0..8],
+    .b = s[0..32],
+};
+
+const out = try oneserial.allocFromShim(T, .{}, &shim, allocator);
+// out.a/out.b are allocated with matching lengths; payload bytes are not copied.
+```
+
+Nested shapes are supported:
+
+```zig
+const T = struct { a: []const []const u8 };
+const s = oneserial.invalidPointer([*]const u8);
+
+const inner = [_][]const u8{
+    s[0..4],
+    s[0..2],
+};
+const shim = T{ .a = inner[0..] };
+
+const out = try oneserial.allocFromShim(T, .{}, &shim, allocator);
+```
+
+When a pointer (or slice `.ptr`) equals `invalidPointer(...)`, OneSerial allocates that container but does not recurse deeper into pointee/element payloads.
+
+> [!IMPORTANT]
+> Values returned by `allocFromShim` may contain undefined non-shape data.  
+> You must initialize payload data before reading it.
 
 ### View Accessors
 

@@ -212,6 +212,32 @@ fn toOwnedNoLeakOnOom(allocator: std.mem.Allocator) !void {
     defer freeOwned(T, allocator, @constCast(&out));
 }
 
+fn allocFromShimNoLeakOnOom(allocator: std.mem.Allocator) !void {
+    const Child = struct {
+        weights: []const u16,
+    };
+    const T = struct {
+        names: []const []const u8,
+        maybe: ?[]const u8,
+        child: *const Child,
+    };
+
+    const child_shim = Child{ .weights = &.{ 1, 2, 3, 4 } };
+    const shim = T{
+        .names = &.{ "one", "two", "three" },
+        .maybe = "present",
+        .child = &child_shim,
+    };
+
+    const out = try one.allocFromShim(T, .{}, &shim, allocator);
+    defer freeOwned(T, allocator, @constCast(&out));
+
+    try testing.expectEqual(@as(usize, 3), out.names.len);
+    try testing.expect(out.maybe != null);
+    try testing.expectEqual(@as(usize, 7), out.maybe.?.len);
+    try testing.expectEqual(@as(usize, 4), out.child.weights.len);
+}
+
 test "primitives" {
     try testRoundtrip(@as(u32, 42));
     try testRoundtrip(@as(f64, 123.456));
@@ -920,6 +946,134 @@ test "meta.alignForward reports overflow" {
 
 test "toOwned does not leak on induced OutOfMemory" {
     try std.testing.checkAllAllocationFailures(testing.allocator, toOwnedNoLeakOnOom, .{});
+}
+
+test "allocFromShim allocates top-level slice lengths without copying payload" {
+    const T = struct {
+        a: []const u8,
+        b: []const u8,
+    };
+
+    const sentinel = one.invalidPointer([*]const u8);
+    const shim = T{
+        .a = sentinel[0..5],
+        .b = sentinel[0..9],
+    };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const out = try one.allocFromShim(T, .{}, &shim, arena.allocator());
+    try testing.expectEqual(@as(usize, 5), out.a.len);
+    try testing.expectEqual(@as(usize, 9), out.b.len);
+    try testing.expect(@intFromPtr(out.a.ptr) != @intFromPtr(sentinel));
+    try testing.expect(@intFromPtr(out.b.ptr) != @intFromPtr(sentinel));
+}
+
+test "allocFromShim recursively allocates nested slice shapes" {
+    const T = struct {
+        a: []const []const u8,
+    };
+
+    const sentinel = one.invalidPointer([*]const u8);
+    const inners = [_][]const u8{
+        sentinel[0..1],
+        sentinel[0..4],
+        sentinel[0..0],
+    };
+    const shim = T{ .a = inners[0..] };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const out = try one.allocFromShim(T, .{}, &shim, arena.allocator());
+    try testing.expectEqual(@as(usize, 3), out.a.len);
+    try testing.expectEqual(@as(usize, 1), out.a[0].len);
+    try testing.expectEqual(@as(usize, 4), out.a[1].len);
+    try testing.expectEqual(@as(usize, 0), out.a[2].len);
+    try testing.expect(@intFromPtr(out.a[0].ptr) != @intFromPtr(sentinel));
+    try testing.expect(@intFromPtr(out.a[1].ptr) != @intFromPtr(sentinel));
+}
+
+test "allocFromShim sentinel slice allocates child array and skips deep recursion" {
+    const T = struct {
+        items: []const []const u8,
+    };
+
+    const outer_sentinel = one.invalidPointer([*]const []const u8);
+    const shim = T{
+        .items = outer_sentinel[0..4],
+    };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const out = try one.allocFromShim(T, .{}, &shim, arena.allocator());
+    try testing.expectEqual(@as(usize, 4), out.items.len);
+    try testing.expect(@intFromPtr(out.items.ptr) != @intFromPtr(outer_sentinel));
+}
+
+test "allocFromShim sentinel one-pointer allocates pointee and stops recursion" {
+    const Child = struct {
+        name: []const u8,
+    };
+    const T = struct {
+        child: *const Child,
+    };
+
+    const child_sentinel = one.invalidPointer(*const Child);
+    const shim = T{ .child = child_sentinel };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const out = try one.allocFromShim(T, .{}, &shim, arena.allocator());
+    try testing.expect(@intFromPtr(out.child) != @intFromPtr(child_sentinel));
+}
+
+test "allocFromShim preserves optional presence and tagged-union active branch" {
+    const T = struct {
+        maybe_none: ?[]const u8,
+        maybe_some: ?[]const u8,
+        pick: union(enum) {
+            bytes: []const u8,
+            code: u16,
+        },
+    };
+
+    const sentinel = one.invalidPointer([*]const u8);
+    const shim_some = T{
+        .maybe_none = null,
+        .maybe_some = sentinel[0..7],
+        .pick = .{ .bytes = sentinel[0..3] },
+    };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const out_some = try one.allocFromShim(T, .{}, &shim_some, arena.allocator());
+    try testing.expect(out_some.maybe_none == null);
+    try testing.expect(out_some.maybe_some != null);
+    try testing.expectEqual(@as(usize, 7), out_some.maybe_some.?.len);
+    switch (out_some.pick) {
+        .bytes => |bytes| try testing.expectEqual(@as(usize, 3), bytes.len),
+        .code => return error.TestUnexpectedResult,
+    }
+
+    const shim_code = T{
+        .maybe_none = null,
+        .maybe_some = null,
+        .pick = .{ .code = 1234 },
+    };
+    const out_code = try one.allocFromShim(T, .{}, &shim_code, arena.allocator());
+    switch (out_code.pick) {
+        .code => {},
+        .bytes => return error.TestUnexpectedResult,
+    }
+}
+
+test "allocFromShim does not leak on induced OutOfMemory" {
+    try std.testing.checkAllAllocationFailures(testing.allocator, allocFromShimNoLeakOnOom, .{});
 }
 
 test "accessor chaining and dynamic get" {
