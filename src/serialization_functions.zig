@@ -87,6 +87,7 @@ fn supportsTypeInner(comptime T: type, comptime seen: []const type) bool {
     };
 }
 
+/// Returns whether `T` is supported by this serializer.
 pub fn supportsType(comptime T: type) bool {
     return supportsTypeInner(T, &.{});
 }
@@ -130,11 +131,13 @@ fn maxAlignmentInner(comptime T: type, comptime seen: []const type) std.mem.Alig
     };
 }
 
+/// Returns the maximum alignment requirement for serialized `T`.
 pub fn maxAlignmentOf(comptime T: type) std.mem.Alignment {
     @setEvalBranchQuota(1_000_000);
     return maxAlignmentInner(T, &.{});
 }
 
+/// Byte buffer type used for serialized `T` payloads.
 pub fn SerializeBytes(comptime T: type) type {
     return []align(maxAlignmentOf(T).toByteUnits()) u8;
 }
@@ -562,12 +565,15 @@ fn sliceElementStart(comptime SliceT: type, bytes: []const u8, start: usize, ind
     return r.pos;
 }
 
+/// Returns a typed view over serialized bytes for `T`.
+/// When `trusted` is false, operations perform bounds/tag validation.
 pub fn View(comptime T: type, comptime trusted: bool) type {
     return struct {
         bytes: []const u8,
         start: usize,
         endian: std.builtin.Endian,
 
+        /// Returns a view for the named struct field.
         pub fn field(self: @This(), comptime field_name: []const u8) ReturnType(trusted, View(fieldTypeByName(T, field_name), trusted)) {
             if (@typeInfo(T) != .@"struct") {
                 @compileError("field() only exists for struct views, got " ++ @typeName(T));
@@ -580,6 +586,7 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
             return .{ .bytes = self.bytes, .start = s, .endian = self.endian };
         }
 
+        /// For dynamic values, returns a validated dynamic view.
         pub fn get(self: @This()) ReturnType(trusted, blk: {
             switch (@typeInfo(T)) {
                 .pointer => |pi| if (pi.size == .one) break :blk View(pi.child, trusted),
@@ -617,6 +624,7 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
             }
         }
 
+        /// Returns slice length for slice views.
         pub fn len(self: @This()) ReturnType(trusted, usize) {
             const ti = @typeInfo(T);
             if (ti != .pointer or ti.pointer.size != .slice) {
@@ -628,6 +636,7 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
             return sliceLen(T, self.bytes, self.start, true, self.endian) catch |err| return toOutOfBounds(err);
         }
 
+        /// Returns the element view at `index` for slice views.
         pub fn at(self: @This(), index: usize) ReturnType(trusted, View(@typeInfo(T).pointer.child, trusted)) {
             const ti = @typeInfo(T);
             if (ti != .pointer or ti.pointer.size != .slice) {
@@ -641,6 +650,7 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
             return .{ .bytes = self.bytes, .start = s, .endian = self.endian };
         }
 
+        /// Returns the element view at `index` without bounds checks.
         pub fn atUnchecked(self: @This(), index: usize) View(@typeInfo(T).pointer.child, trusted) {
             const ti = @typeInfo(T);
             if (ti != .pointer or ti.pointer.size != .slice) {
@@ -650,12 +660,14 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
             return .{ .bytes = self.bytes, .start = s, .endian = self.endian };
         }
 
+        /// Returns a copy of this view using a different wire endianness.
         pub fn withEndian(self: @This(), endian: std.builtin.Endian) @This() {
             var out = self;
             out.endian = endian;
             return out;
         }
 
+        /// Decodes the view into a value, using the page allocator for dynamic children.
         pub fn value(self: @This()) ReturnType(trusted, T) {
             var r = Reader().initAt(self.bytes, self.start, !trusted, self.endian);
             const decoded = decodeValue(T, &r, std.heap.page_allocator) catch |err| {
@@ -666,6 +678,7 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
             return out;
         }
 
+        /// Deep-decodes the view into owned memory allocated from `gpa`.
         pub fn toOwned(self: @This(), gpa: std.mem.Allocator) DeserializeError!T {
             var r = Reader().initAt(self.bytes, self.start, !trusted, self.endian);
             const decoded = try decodeValue(T, &r, gpa);
@@ -688,9 +701,12 @@ fn decodeRootExact(comptime T: type, bytes: []const u8, checked: bool, endian: s
     return out;
 }
 
+/// Returns the converter namespace for `T` with a default wire endianness.
 pub fn Converter(comptime T: type, comptime default_endian: std.builtin.Endian) type {
     return struct {
+        /// Source value type handled by this converter namespace.
         pub const Type = T;
+        /// Maximum alignment required by serialized bytes for `T`.
         pub const alignment = maxAlignmentOf(T);
         /// A wrapper around untrusted data.
         /// Bound checks are done on every access
@@ -699,6 +715,7 @@ pub fn Converter(comptime T: type, comptime default_endian: std.builtin.Endian) 
             endian: std.builtin.Endian,
             view: View(T, false),
 
+            /// Creates an untrusted handle around raw serialized bytes.
             pub fn init(bytes: []const u8) @This() {
                 return .{
                     .bytes = bytes,
@@ -707,6 +724,7 @@ pub fn Converter(comptime T: type, comptime default_endian: std.builtin.Endian) 
                 };
             }
 
+            /// Returns a copy with a different wire endianness.
             pub fn withEndian(self: @This(), endian: std.builtin.Endian) @This() {
                 var out = self;
                 out.endian = endian;
@@ -714,25 +732,30 @@ pub fn Converter(comptime T: type, comptime default_endian: std.builtin.Endian) 
                 return out;
             }
 
+            /// Fully validates the buffer and upgrades to a trusted handle.
             pub fn validate(self: @This()) ValidationError!Trusted {
                 try validateExact(T, self.bytes, self.endian);
                 return Trusted.initWithEndian(self.bytes, self.endian);
             }
 
+            /// Converts to trusted without validation.
             pub fn unsafeTrusted(self: @This()) Trusted {
                 return Trusted.initWithEndian(self.bytes, self.endian);
             }
 
+            /// Decodes the full buffer into owned memory after validation.
             pub fn toOwned(self: @This(), gpa: std.mem.Allocator) DeserializeError!T {
                 const decoded = try decodeRootExact(T, self.bytes, true, self.endian, gpa);
                 const out: T = returnDecoded(T, decoded);
                 return out;
             }
 
+            /// Returns a checked field view for struct roots.
             pub fn field(self: @This(), comptime field_name: []const u8) ValidationError!View(fieldTypeByName(T, field_name), false) {
                 return self.view.field(field_name);
             }
 
+            /// For dynamic roots, returns a checked dynamic view.
             pub fn get(self: @This()) ReturnType(false, blk: {
                 switch (@typeInfo(T)) {
                     .pointer => |pi| if (pi.size == .one) break :blk View(pi.child, false),
@@ -743,28 +766,34 @@ pub fn Converter(comptime T: type, comptime default_endian: std.builtin.Endian) 
                 return self.view.get();
             }
 
+            /// Returns the length for slice roots.
             pub fn len(self: @This()) ValidationError!usize {
                 return self.view.len();
             }
 
+            /// Returns a checked element view for slice roots.
             pub fn at(self: @This(), index: usize) ValidationError!View(@typeInfo(T).pointer.child, false) {
                 return self.view.at(index);
             }
 
+            /// Returns an unchecked element view for slice roots.
             pub fn atUnchecked(self: @This(), index: usize) View(@typeInfo(T).pointer.child, false) {
                 return self.view.atUnchecked(index);
             }
 
+            /// Decodes the root value using checked semantics.
             pub fn value(self: @This()) ReturnType(false, T) {
                 return self.view.value();
             }
         };
 
+        /// Trusted typed access over serialized bytes.
         pub const Trusted = struct {
             bytes: []const u8,
             endian: std.builtin.Endian,
             view: View(T, true),
 
+            /// Creates a trusted handle around bytes that are already trusted.
             pub fn init(bytes: []const u8) @This() {
                 return .{
                     .bytes = bytes,
@@ -780,6 +809,7 @@ pub fn Converter(comptime T: type, comptime default_endian: std.builtin.Endian) 
                 return out;
             }
 
+            /// Returns a copy with a different wire endianness.
             pub fn withEndian(self: @This(), endian: std.builtin.Endian) @This() {
                 var out = self;
                 out.endian = endian;
@@ -787,16 +817,19 @@ pub fn Converter(comptime T: type, comptime default_endian: std.builtin.Endian) 
                 return out;
             }
 
+            /// Deep-decodes the full buffer into owned memory.
             pub fn toOwned(self: @This(), gpa: std.mem.Allocator) DeserializeError!T {
                 const decoded = try decodeRootExact(T, self.bytes, false, self.endian, gpa);
                 const out: T = returnDecoded(T, decoded);
                 return out;
             }
 
+            /// Returns a field view for struct roots.
             pub fn field(self: @This(), comptime field_name: []const u8) View(fieldTypeByName(T, field_name), true) {
                 return self.view.field(field_name);
             }
 
+            /// For dynamic roots, returns a dynamic view.
             pub fn get(self: @This()) ReturnType(true, blk: {
                 switch (@typeInfo(T)) {
                     .pointer => |pi| if (pi.size == .one) break :blk View(pi.child, true),
@@ -807,30 +840,37 @@ pub fn Converter(comptime T: type, comptime default_endian: std.builtin.Endian) 
                 return self.view.get();
             }
 
+            /// Returns the length for slice roots.
             pub fn len(self: @This()) usize {
                 return self.view.len();
             }
 
+            /// Returns an element view for slice roots.
             pub fn at(self: @This(), index: usize) View(@typeInfo(T).pointer.child, true) {
                 return self.view.at(index);
             }
 
+            /// Returns an unchecked element view for slice roots.
             pub fn atUnchecked(self: @This(), index: usize) View(@typeInfo(T).pointer.child, true) {
                 return self.view.atUnchecked(index);
             }
 
+            /// Decodes the root value.
             pub fn value(self: @This()) T {
                 return self.view.value();
             }
         };
 
+        /// Owns the serialized byte buffer for a value of `T`.
         pub const Wrapper = struct {
             memory: SerializeBytes(T),
 
+            /// Serializes `value` into newly allocated wrapper-owned memory.
             pub fn init(value: *const T, gpa: std.mem.Allocator) SerializeError!@This() {
                 return .{ .memory = try serializeAlloc(value, gpa) };
             }
 
+            /// Frees the owned serialized memory.
             pub fn deinit(self: @This(), gpa: std.mem.Allocator) void {
                 gpa.free(self.memory);
             }
@@ -848,16 +888,18 @@ pub fn Converter(comptime T: type, comptime default_endian: std.builtin.Endian) 
 
             /// Do bounds checking and Converter to trusted
             pub fn validate(self: @This()) !Trusted {
-                self.untrusted().validate();
+                return self.untrusted().validate();
             }
         };
 
+        /// Returns the serialized byte size needed for `value`.
         pub fn serializedSize(value: *const T) ValidationError!usize {
             var w = Writer().init(null, default_endian);
             try serializeValue(T, &w, value);
             return w.pos;
         }
 
+        /// Serializes `value` into a newly allocated byte buffer.
         pub fn serializeAlloc(value: *const T, gpa: std.mem.Allocator) SerializeError!SerializeBytes(T) {
             const size = try serializedSize(value);
             const bytes = try gpa.alignedAlloc(u8, alignment, size);
@@ -868,10 +910,12 @@ pub fn Converter(comptime T: type, comptime default_endian: std.builtin.Endian) 
             return bytes;
         }
 
+        /// Creates an untrusted handle over `bytes`.
         pub fn untrusted(bytes: []const u8) Untrusted {
             return Untrusted.init(bytes);
         }
 
+        /// Creates a trusted handle over `bytes` without validation.
         pub fn trustedUnchecked(bytes: []const u8) Trusted {
             return Trusted.init(bytes);
         }

@@ -16,22 +16,27 @@ pub const ValidationError = SerializationFunctions.ValidationError;
 pub const SerializeError = SerializationFunctions.SerializeError;
 pub const DeserializeError = SerializationFunctions.DeserializeError;
 
+/// Returns the per-type converter namespace for `T` and the selected options.
 pub fn Converter(comptime T: type, comptime options: MergeOptions) type {
     return SerializationFunctions.Converter(T, options.endian);
 }
 
+/// Returns the owned serialized wrapper type for `T`.
 pub fn Wrapper(comptime T: type, comptime options: MergeOptions) type {
     return Converter(T, options).Wrapper;
 }
 
+/// Returns the untrusted view type for serialized `T` bytes.
 pub fn Untrusted(comptime T: type, comptime options: MergeOptions) type {
     return Converter(T, options).Untrusted;
 }
 
+/// Returns the trusted view type for serialized `T` bytes.
 pub fn Trusted(comptime T: type, comptime options: MergeOptions) type {
     return Converter(T, options).Trusted;
 }
 
+/// Serializes `value` into a newly allocated contiguous byte buffer.
 pub fn serializeAlloc(
     comptime T: type,
     comptime options: MergeOptions,

@@ -182,7 +182,7 @@ fn testRoundtrip(_value: anytype) !void {
     defer wrapped.deinit(testing.allocator);
     try testing.expect(std.mem.isAligned(@intFromPtr(wrapped.memory.ptr), expected_alignment));
 
-    const wrapped_trusted = try wrapped.untrusted().validate();
+    const wrapped_trusted = try wrapped.validate();
     const out_wrapped = try wrapped_trusted.toOwned(testing.allocator);
     defer freeOwned(T, testing.allocator, @constCast(&out_wrapped));
     try expectEquivalent(value, out_wrapped);
