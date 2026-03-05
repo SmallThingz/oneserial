@@ -259,19 +259,13 @@ test "structs and enums" {
     try testRoundtrip(Color.green);
 }
 
-test "optional and error unions" {
-    const MyError = error{Oops};
-    const Wrapped = struct { v: MyError!u32 };
-
+test "optionals" {
     try testRoundtrip(@as(?i32, 42));
     try testRoundtrip(@as(?i32, null));
 
     var y: i32 = 123;
     try testRoundtrip(@as(?*const i32, &y));
     try testRoundtrip(@as(?*const i32, null));
-
-    try testRoundtrip(Wrapped{ .v = 123 });
-    try testRoundtrip(Wrapped{ .v = MyError.Oops });
 }
 
 test "tagged unions" {
@@ -593,7 +587,7 @@ test "mutual recursion with complex mixed layout (acyclic data)" {
                 codes: [3]u16,
                 tags: []const []const u8,
             },
-            status: error{Bad}![]const u8,
+            status: union(enum) { ok: []const u8, bad: void },
         };
 
         const NodeB = struct {
@@ -618,7 +612,7 @@ test "mutual recursion with complex mixed layout (acyclic data)" {
         .label = "a3",
         .links = .{ null, null },
         .meta = .{ .codes = .{ 1, 2, 3 } },
-        .status = "ok-a3",
+        .status = .{ .ok = "ok-a3" },
     };
 
     const b2 = NodeB{
@@ -635,7 +629,7 @@ test "mutual recursion with complex mixed layout (acyclic data)" {
         .label = "a2",
         .links = .{ null, &b2 },
         .meta = .{ .tags = &.{ "k1", "k2" } },
-        .status = error.Bad,
+        .status = .{ .bad = {} },
     };
 
     const b1 = NodeB{
@@ -652,7 +646,7 @@ test "mutual recursion with complex mixed layout (acyclic data)" {
         .label = "a1-root",
         .links = .{ &b1, null },
         .meta = .{ .none = {} },
-        .status = "ok-a1",
+        .status = .{ .ok = "ok-a1" },
     };
 
     try testRoundtrip(a1);
@@ -685,7 +679,7 @@ test "multi-level mutual recursion with unions slices arrays pointers enums (acy
                 alt: ?*const Leaf,
                 packed_bytes: [2]u8,
             },
-            health: error{Offline}![]const u8,
+            health: union(enum) { healthy: []const u8, offline: void },
         };
 
         const Leaf = struct {
@@ -741,7 +735,7 @@ test "multi-level mutual recursion with unions slices arrays pointers enums (acy
         .parent = null,
         .leaves = &.{&leaf3},
         .chooser = .{ .primary = &leaf3 },
-        .health = error.Offline,
+        .health = .{ .offline = {} },
     };
 
     const branch1 = Branch{
@@ -749,7 +743,7 @@ test "multi-level mutual recursion with unions slices arrays pointers enums (acy
         .parent = null,
         .leaves = &.{ &leaf1, &leaf2, &leaf3 },
         .chooser = .{ .alt = &leaf2 },
-        .health = "healthy",
+        .health = .{ .healthy = "healthy" },
     };
 
     const root2 = Root{
@@ -772,13 +766,13 @@ test "multi-level mutual recursion with unions slices arrays pointers enums (acy
     try testRoundtrip(root1);
 }
 
-test "nested error unions and optionals" {
-    const Payload = error{Fail}!?[]const u8;
+test "nested unions and optionals" {
+    const Payload = union(enum) { none: void, some: ?[]const u8, fail: bool };
     const S = struct { p: Payload };
 
-    try testRoundtrip(S{ .p = @as([]const u8, "nest") });
-    try testRoundtrip(S{ .p = @as(?[]const u8, null) });
-    try testRoundtrip(S{ .p = error.Fail });
+    try testRoundtrip(S{ .p = .{ .some = @as([]const u8, "nest") } });
+    try testRoundtrip(S{ .p = .{ .some = @as(?[]const u8, null) } });
+    try testRoundtrip(S{ .p = .{ .fail = true } });
 }
 
 test "union with mixed static and dynamic fields" {
@@ -920,20 +914,6 @@ test "invalid optional tag is rejected by validate and toOwned" {
     try testing.expectError(error.InvalidTag, u.toOwned(testing.allocator));
 }
 
-test "invalid error-union code is rejected by validate and toOwned" {
-    const T = error{A}!u8;
-    const value: T = error.A;
-    const bytes = try one.serializeAlloc(T, .{}, &value, testing.allocator);
-    defer testing.allocator.free(bytes);
-
-    const valid: u16 = @intCast(@intFromError(error.A));
-    const invalid: u16 = if (valid == std.math.maxInt(u16)) valid - 1 else valid + 1;
-    std.mem.writeInt(u16, bytes[1..3], invalid, builtin.target.cpu.arch.endian());
-
-    const u = one.Untrusted(T, .{}).init(bytes);
-    try testing.expectError(error.InvalidTag, u.validate());
-}
-
 test "meta.alignForward reports overflow" {
     try testing.expectError(error.Overflow, meta.alignForward(std.math.maxInt(usize), 8));
 }
@@ -980,7 +960,7 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
     const Namespace = struct {
         const Mode = enum { alpha, beta, gamma };
         const Class = enum { leaf, branch, core };
-        const StatusErr = error{ Disconnected, Corrupt };
+        const Status = union(enum) { ok: []const u8, fail: enum { disconnected, corrupt } };
 
         const Event = union(enum) {
             none: void,
@@ -1008,7 +988,7 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
             title: []const u8,
             notes: []const union(enum) { text: []const u8, code: u16, flag: bool },
             route: [2]Event,
-            maybe_status: ?StatusErr![]const u8,
+            maybe_status: ?Status,
             packed_bits: packed struct { a: u3, b: bool, c: u4 },
             scratch: [2][3]u8,
             vec4: @Vector(4, f32),
@@ -1054,7 +1034,7 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
             backlinks: [2]?*const NodeD,
             chunks: []const Chunk,
             maybe_event: ?Event,
-            status: StatusErr![]const u8,
+            status: Status,
             matrix: [2][3]u8,
         };
 
@@ -1073,7 +1053,7 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
                 ids: [3]u16,
                 opt: ?*const NodeC,
             },
-            outcome: StatusErr![]const u8,
+            outcome: Status,
         };
     };
 
@@ -1102,7 +1082,7 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
         .events = &.{ ev1, ev2, ev7 },
         .watchers = &.{ null, null },
         .state = .{ .empty = {} },
-        .outcome = "d3-ok",
+        .outcome = .{ .ok = "d3-ok" },
     };
 
     const d2 = NodeD{
@@ -1115,7 +1095,7 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
         .events = &.{ ev3, ev4, ev5 },
         .watchers = &.{ null, null, null },
         .state = .{ .ids = .{ 1, 2, 3 } },
-        .outcome = error.Disconnected,
+        .outcome = .{ .fail = .disconnected },
     };
 
     const d1 = NodeD{
@@ -1128,7 +1108,7 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
         .events = &.{ ev6, ev7, ev1, ev3 },
         .watchers = &.{ null, null },
         .state = .{ .bytes = "d1-state" },
-        .outcome = "d1-ok",
+        .outcome = .{ .ok = "d1-ok" },
     };
 
     const ch1 = Chunk{
@@ -1165,7 +1145,7 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
         .backlinks = .{ &d3, null },
         .chunks = &.{ch3},
         .maybe_event = null,
-        .status = "c3-ok",
+        .status = .{ .ok = "c3-ok" },
         .matrix = .{ .{ 9, 8, 7 }, .{ 6, 5, 4 } },
     };
 
@@ -1176,7 +1156,7 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
         .backlinks = .{ &d3, &d2 },
         .chunks = &.{ ch2, ch3 },
         .maybe_event = ev5,
-        .status = error.Disconnected,
+        .status = .{ .fail = .disconnected },
         .matrix = .{ .{ 4, 5, 6 }, .{ 7, 8, 9 } },
     };
 
@@ -1187,7 +1167,7 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
         .backlinks = .{ &d2, &d3 },
         .chunks = &.{ ch1, ch2, ch3 },
         .maybe_event = ev7,
-        .status = "c1-ok",
+        .status = .{ .ok = "c1-ok" },
         .matrix = .{ .{ 1, 2, 3 }, .{ 3, 2, 1 } },
     };
 
@@ -1227,7 +1207,7 @@ test "single massive messy quadruple-mutual-recursive type graph (acyclic data)"
         .title = "mega-root",
         .notes = &.{ .{ .text = "note-a" }, .{ .code = 42 }, .{ .flag = true } },
         .route = .{ ev4, ev7 },
-        .maybe_status = error.Corrupt,
+        .maybe_status = .{ .fail = .corrupt },
         .packed_bits = .{ .a = 5, .b = true, .c = 9 },
         .scratch = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 } },
         .vec4 = .{ 1.0, 2.0, 3.5, 4.5 },
@@ -1242,7 +1222,8 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
     const NS = struct {
         const Mode = enum(u8) { m0, m1, m2, m3 };
         const Flavor = enum { sour, sweet, bitter };
-        const E = error{ Broken, Missing, Timeout };
+        const Fault = enum { broken, missing, timeout };
+        const Status = union(enum) { ok: []const u8, err: Fault };
 
         const Bits = packed struct { a: u1, b: u3, c: bool, d: u4 };
         const Mini = struct {
@@ -1268,7 +1249,7 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
             id: u16,
             z: ?*const TrioZ,
             xs: []const ?*const TrioX,
-            res: E![]const u8,
+            res: Status,
             maybe: ?[]const u8,
             bucket: [2]union(enum) {
                 n: i32,
@@ -1311,7 +1292,7 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
                 bytes: []const u8,
                 ids: [3]u16,
                 ok: bool,
-                err: E![]const u8,
+                err: Status,
             },
             values: [3]u8,
         };
@@ -1323,7 +1304,7 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
             peers: []const ?*const QuadC,
             tri: ?*const TrioX,
             grid: [2][2]u8,
-            status: E![]const u8,
+            status: Status,
         };
 
         const QuadD = struct {
@@ -1349,7 +1330,7 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
             vec: @Vector(4, u8),
             arr: [3]u16,
             bits: Bits,
-            err: E![]const u8,
+            err: Status,
             maybe_d: ?*const QuadD,
             maybe_z: ?*const TrioZ,
             inner: union(enum) {
@@ -1375,8 +1356,8 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
             payloads: []const Payload,
             pick: Payload,
             maybe_pick: ?Payload,
-            status: E![]const u8,
-            maybe_status: ?E![]const u8,
+            status: Status,
+            maybe_status: ?Status,
             one_d: *const QuadD,
             maybe_c: ?*const QuadC,
             many_b: []const ?*const QuadB,
@@ -1392,7 +1373,7 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
                 mixed: struct {
                     maybe_ptr: ?*const QuadA,
                     note: []const u8,
-                    e: ?E![]const u8,
+                    e: ?Status,
                 },
             },
         };
@@ -1420,7 +1401,7 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
         .id = 102,
         .z = &z2,
         .xs = &.{null},
-        .res = error.Timeout,
+        .res = .{ .err = .timeout },
         .maybe = null,
         .bucket = .{ .{ .n = -1 }, .{ .t = "y2" } },
     };
@@ -1445,7 +1426,7 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
         .id = 101,
         .z = &z1,
         .xs = &.{ &x2, null },
-        .res = "y1-ok",
+        .res = .{ .ok = "y1-ok" },
         .maybe = "optional-y1",
         .bucket = .{ .{ .f = true }, .{ .t = "bucket" } },
     };
@@ -1505,7 +1486,7 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
         .peers = &.{null},
         .tri = &x2,
         .grid = .{ .{ 9, 8 }, .{ 7, 6 } },
-        .status = "c3-ok",
+        .status = .{ .ok = "c3-ok" },
     };
 
     const c2 = QuadC{
@@ -1515,7 +1496,7 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
         .peers = &.{ &c3, null },
         .tri = &x1,
         .grid = .{ .{ 4, 3 }, .{ 2, 1 } },
-        .status = error.Missing,
+        .status = .{ .err = .missing },
     };
 
     const c1 = QuadC{
@@ -1525,7 +1506,7 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
         .peers = &.{ &c2, &c3 },
         .tri = null,
         .grid = .{ .{ 1, 2 }, .{ 3, 4 } },
-        .status = "c1-ok",
+        .status = .{ .ok = "c1-ok" },
     };
 
     const b2 = QuadB{
@@ -1544,7 +1525,7 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
         .c = &c1,
         .maybe_d = &d2,
         .links = .{ null, null },
-        .choice = .{ .err = error.Broken },
+        .choice = .{ .err = .{ .err = .broken } },
         .values = .{ 1, 2, 3 },
     };
 
@@ -1566,7 +1547,7 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
     const p5: Payload = .{ .vec = .{ 1, 2, 3, 4 } };
     const p6: Payload = .{ .arr = .{ 8, 9, 10 } };
     const p7: Payload = .{ .bits = .{ .a = 1, .b = 5, .c = true, .d = 12 } };
-    const p8: Payload = .{ .err = error.Timeout };
+    const p8: Payload = .{ .err = .{ .err = .timeout } };
     const p9: Payload = .{ .maybe_d = &d3 };
     const p10: Payload = .{ .maybe_z = &z1 };
     const p11: Payload = .{ .inner = .{ .pair = .{ -4, 5 } } };
@@ -1592,8 +1573,8 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
         .payloads = &.{ p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11 },
         .pick = p11,
         .maybe_pick = p7,
-        .status = "status-ok",
-        .maybe_status = error.Missing,
+        .status = .{ .ok = "status-ok" },
+        .maybe_status = .{ .err = .missing },
         .one_d = &d1,
         .maybe_c = &c2,
         .many_b = &.{ &b1, null, &b2 },
@@ -1606,7 +1587,7 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
         .alt = .{ .mixed = .{
             .maybe_ptr = &a1,
             .note = "alt-note",
-            .e = "inner-ok",
+            .e = .{ .ok = "inner-ok" },
         } },
     };
 
@@ -1630,7 +1611,6 @@ test "type-id coverage for every Zig language type tag" {
             .pointer,
             .@"struct",
             .optional,
-            .error_union,
             .@"union",
             .null,
             => true,
@@ -1644,6 +1624,7 @@ test "type-id coverage for every Zig language type tag" {
             .@"anyframe",
             .enum_literal,
             .@"opaque",
+            .error_union,
             .error_set,
             => false,
         };
@@ -1666,7 +1647,6 @@ test "type-level support coverage with representative types" {
     try testing.expect(SF.supportsType([]const u8));
     try testing.expect(SF.supportsType(struct { a: u8, b: []const u8 }));
     try testing.expect(SF.supportsType(?[]const u8));
-    try testing.expect(SF.supportsType(error{E}![]const u8));
     try testing.expect(SF.supportsType(union(enum) { a: u8, b: []const u8 }));
     try testing.expect(SF.supportsType(@TypeOf(null)));
 
@@ -1680,6 +1660,7 @@ test "type-level support coverage with representative types" {
     try testing.expect(!SF.supportsType(@TypeOf(.foo)));
     try testing.expect(!SF.supportsType(opaque {}));
     try testing.expect(!SF.supportsType(error{A}));
+    try testing.expect(!SF.supportsType(error{E}![]const u8));
     try testing.expect(!SF.supportsType([*]const u8));
     try testing.expect(!SF.supportsType([*c]const u8));
     try testing.expect(!SF.supportsType(union { a: u8, b: u16 }));
@@ -1709,7 +1690,7 @@ test "opposite-endian wire roundtrip" {
         values: []const u16,
         mode: enum(u16) { a = 1, b = 2, c = 3 },
         payload: union(enum) { text: []const u8, count: u32 },
-        result: error{Oops}!u64,
+        result: union(enum) { ok: u64, fail: bool },
         vec: @Vector(4, u16),
     };
 
@@ -1718,7 +1699,7 @@ test "opposite-endian wire roundtrip" {
         .values = &.{ 10, 20, 30, 40 },
         .mode = .c,
         .payload = .{ .text = "wire" },
-        .result = 0x11_22_33_44_55_66_77_88,
+        .result = .{ .ok = 0x11_22_33_44_55_66_77_88 },
         .vec = .{ 1, 2, 3, 4 },
     };
 

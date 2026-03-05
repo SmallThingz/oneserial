@@ -38,7 +38,7 @@ const Msg = struct {
         code: u16,
         none: void,
     },
-    result: error{Offline}![]const u8,
+    result: union(enum) { ok: []const u8, offline: void },
 };
 
 pub fn main() !void {
@@ -51,7 +51,7 @@ pub fn main() !void {
         .tags = &.{ "alpha", "beta", "gamma" },
         .maybe_ptr = &n,
         .payload = .{ .text = "hello" },
-        .result = "ok",
+        .result = .{ .ok = "ok" },
     };
 
     var wrapper = try oneserial.Wrapper(Msg, .{}).init(&msg, gpa);
@@ -126,13 +126,14 @@ Available on `Untrusted`, `Trusted`, and nested views as type-appropriate:
 ## Supported Types
 
 - Primitives: `void`, `bool`, integers, floats, vectors, `null`
-- Containers: arrays, structs, tagged unions, optionals, error unions
+- Containers: arrays, structs, tagged unions, optionals
 - Indirection: `*T` (one pointers) and `[]T` (slices)
 - Enums
 
 ## Not Supported
 
 - `[*]T` and `[*c]T`
+- `error` and `error_union` values
 - Untagged unions
 - `type`, `noreturn`, comptime-only value types, `opaque`, standalone `error_set`, function/frame types
 

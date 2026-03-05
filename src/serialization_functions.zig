@@ -31,7 +31,6 @@ pub fn supportsTypeId(tag: std.builtin.TypeId) bool {
         .pointer,
         .@"struct",
         .optional,
-        .error_union,
         .@"union",
         .null,
         => true,
@@ -64,7 +63,7 @@ fn supportsTypeInner(comptime T: type, comptime seen: []const type) bool {
             break :blk true;
         },
         .optional => |oi| supportsTypeInner(oi.child, next_seen),
-        .error_union => |ei| supportsTypeInner(ei.payload, next_seen),
+        .error_union => false,
         .@"union" => |ui| blk: {
             if (ui.tag_type == null) break :blk false;
             inline for (ui.fields) |field| {
@@ -116,7 +115,7 @@ fn maxAlignmentInner(comptime T: type, comptime seen: []const type) std.mem.Alig
             break :blk out;
         },
         .optional => |oi| maxAlignmentInner(oi.child, next_seen).max(.@"1"),
-        .error_union => |ei| maxAlignmentInner(ei.payload, next_seen).max(std.mem.Alignment.fromByteUnits(@alignOf(u16))),
+        .error_union => @compileError("Unsupported type in oneserial: " ++ @typeName(T)),
         .@"union" => |ui| blk: {
             var out: std.mem.Alignment = .@"1";
             if (ui.tag_type) |Tag| out = out.max(std.mem.Alignment.fromByteUnits(@alignOf(Tag)));
@@ -160,7 +159,7 @@ fn containsDynamic(comptime T: type) bool {
             break :blk false;
         },
         .optional => |oi| containsDynamic(oi.child),
-        .error_union => |ei| containsDynamic(ei.payload),
+        .error_union => false,
         .@"union" => |ui| blk: {
             inline for (ui.fields) |field| {
                 if (containsDynamic(field.type)) break :blk true;
@@ -334,17 +333,7 @@ fn serializeValue(comptime T: type, w: *Writer(), value: *const T) ValidationErr
                 try w.writePod(u8, 0);
             }
         },
-        .error_union => |ei| {
-            if (value.*) |payload| {
-                try w.writePod(u8, 1);
-                var p = payload;
-                try serializeValue(ei.payload, w, &p);
-            } else |e| {
-                try w.writePod(u8, 0);
-                const code: u16 = @intCast(@intFromError(e));
-                try w.writePod(u16, code);
-            }
-        },
+        .error_union => @compileError("Unsupported type in oneserial: " ++ @typeName(T)),
         .@"union" => |ui| {
             const Tag = ui.tag_type orelse @compileError("Cannot serialize untagged union: " ++ @typeName(T));
             const tag: Tag = std.meta.activeTag(value.*);
@@ -403,17 +392,7 @@ fn skipValue(comptime T: type, r: *Reader()) ValidationError!void {
                 else => return error.InvalidTag,
             }
         },
-        .error_union => |ei| {
-            const tag = try r.readPod(u8);
-            switch (tag) {
-                0 => {
-                    const code = try r.readPod(u16);
-                    if (errorSetFromCode(ei.error_set, code) == null) return error.InvalidTag;
-                },
-                1 => try skipValue(ei.payload, r),
-                else => return error.InvalidTag,
-            }
-        },
+        .error_union => @compileError("Unsupported type in oneserial: " ++ @typeName(T)),
         .@"union" => |ui| {
             const Tag = ui.tag_type orelse @compileError("Cannot skip untagged union: " ++ @typeName(T));
             const tag = try readTag(Tag, r);
@@ -460,9 +439,7 @@ fn freeDecoded(comptime T: type, gpa: std.mem.Allocator, value: *T) void {
         .optional => |oi| {
             if (value.*) |*payload| freeDecoded(oi.child, gpa, @constCast(payload));
         },
-        .error_union => |ei| {
-            if (value.*) |*payload| freeDecoded(ei.payload, gpa, @constCast(payload)) else |_| {}
-        },
+        .error_union => {},
         .@"union" => switch (value.*) {
             inline else => |*payload| freeDecoded(@TypeOf(payload.*), gpa, @constCast(payload)),
         },
@@ -472,21 +449,6 @@ fn freeDecoded(comptime T: type, gpa: std.mem.Allocator, value: *T) void {
 
 fn returnDecoded(comptime T: type, decoded: Decoded(T)) T {
     return decoded.value;
-}
-
-fn errorSetFromCode(comptime ErrorSet: type, code: u16) ?ErrorSet {
-    const maybe_fields = @typeInfo(ErrorSet).error_set;
-    if (maybe_fields) |fields| {
-        inline for (fields) |field| {
-            const e: ErrorSet = @field(ErrorSet, field.name);
-            if (@intFromError(e) == code) return e;
-        }
-        return null;
-    }
-
-    // `anyerror` cannot be exhaustively enumerated at comptime.
-    const e: anyerror = @errorFromInt(code);
-    return @as(ErrorSet, @errorCast(e));
 }
 
 fn decodeValue(comptime T: type, r: *Reader(), gpa: std.mem.Allocator) DeserializeError!Decoded(T) {
@@ -569,22 +531,7 @@ fn decodeValue(comptime T: type, r: *Reader(), gpa: std.mem.Allocator) Deseriali
             }
             return .{ .value = out };
         },
-        .error_union => |ei| {
-            const tag = try r.readPod(u8);
-            var out: T = undefined;
-            switch (tag) {
-                0 => {
-                    const code = try r.readPod(u16);
-                    const e = errorSetFromCode(ei.error_set, code) orelse return error.InvalidTag;
-                    out = e;
-                },
-                1 => {
-                    out = (try decodeValue(ei.payload, r, gpa)).value;
-                },
-                else => return error.InvalidTag,
-            }
-            return .{ .value = out };
-        },
+        .error_union => @compileError("Unsupported type in oneserial: " ++ @typeName(T)),
         .@"union" => |ui| {
             const Tag = ui.tag_type orelse @compileError("Cannot decode untagged union: " ++ @typeName(T));
             const tag = try readTag(Tag, r);
