@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const one = @import("root.zig");
+const meta = @import("meta.zig");
 const testing = std.testing;
 
 fn expectEquivalent(expected: anytype, actual: anytype) anyerror!void {
@@ -186,6 +187,29 @@ fn testRoundtrip(_value: anytype) !void {
     const out_wrapped = try wrapped_trusted.toOwned(testing.allocator);
     defer freeOwned(T, testing.allocator, @constCast(&out_wrapped));
     try expectEquivalent(value, out_wrapped);
+}
+
+fn toOwnedNoLeakOnOom(allocator: std.mem.Allocator) !void {
+    const T = struct {
+        a: []const u8,
+        b: []const []const u8,
+        c: struct {
+            x: []const u16,
+            y: []const u8,
+        },
+    };
+
+    const value = T{
+        .a = "hello",
+        .b = &.{ "one", "two", "three" },
+        .c = .{ .x = &.{ 10, 20, 30, 40 }, .y = "world" },
+    };
+
+    const bytes = try one.serializeAlloc(T, .{}, &value, testing.allocator);
+    defer testing.allocator.free(bytes);
+
+    const out = try one.Untrusted(T, .{}).init(bytes).toOwned(allocator);
+    defer freeOwned(T, allocator, @constCast(&out));
 }
 
 test "primitives" {
@@ -855,6 +879,67 @@ test "untrusted checked access reports OutOfBounds" {
     const elem = try a.at(2);
     try testing.expectError(error.OutOfBounds, elem.value());
     try testing.expectError(error.OutOfBounds, a.at(10));
+}
+
+test "invalid enum tag is rejected by validate and toOwned" {
+    const T = enum(u8) { a = 1, b = 2 };
+    const value: T = .a;
+    const bytes = try one.serializeAlloc(T, .{}, &value, testing.allocator);
+    defer testing.allocator.free(bytes);
+
+    bytes[0] = 255;
+    const u = one.Untrusted(T, .{}).init(bytes);
+    try testing.expectError(error.InvalidEnumTag, u.validate());
+    try testing.expectError(error.InvalidEnumTag, u.toOwned(testing.allocator));
+}
+
+test "invalid union tag is rejected by validate and toOwned" {
+    const T = union(enum(u8)) {
+        a: u8,
+        b: u8,
+    };
+    const value: T = .{ .a = 7 };
+    const bytes = try one.serializeAlloc(T, .{}, &value, testing.allocator);
+    defer testing.allocator.free(bytes);
+
+    bytes[0] = 99;
+    const u = one.Untrusted(T, .{}).init(bytes);
+    try testing.expectError(error.InvalidUnionTag, u.validate());
+    try testing.expectError(error.InvalidUnionTag, u.toOwned(testing.allocator));
+}
+
+test "invalid optional tag is rejected by validate and toOwned" {
+    const T = ?u8;
+    const value: T = 12;
+    const bytes = try one.serializeAlloc(T, .{}, &value, testing.allocator);
+    defer testing.allocator.free(bytes);
+
+    bytes[0] = 2;
+    const u = one.Untrusted(T, .{}).init(bytes);
+    try testing.expectError(error.InvalidTag, u.validate());
+    try testing.expectError(error.InvalidTag, u.toOwned(testing.allocator));
+}
+
+test "invalid error-union code is rejected by validate and toOwned" {
+    const T = error{A}!u8;
+    const value: T = error.A;
+    const bytes = try one.serializeAlloc(T, .{}, &value, testing.allocator);
+    defer testing.allocator.free(bytes);
+
+    const valid: u16 = @intCast(@intFromError(error.A));
+    const invalid: u16 = if (valid == std.math.maxInt(u16)) valid - 1 else valid + 1;
+    std.mem.writeInt(u16, bytes[1..3], invalid, builtin.target.cpu.arch.endian());
+
+    const u = one.Untrusted(T, .{}).init(bytes);
+    try testing.expectError(error.InvalidTag, u.validate());
+}
+
+test "meta.alignForward reports overflow" {
+    try testing.expectError(error.LengthOverflow, meta.alignForward(std.math.maxInt(usize), 8));
+}
+
+test "toOwned does not leak on induced OutOfMemory" {
+    try std.testing.checkAllAllocationFailures(testing.allocator, toOwnedNoLeakOnOom, .{});
 }
 
 test "accessor chaining and dynamic get" {

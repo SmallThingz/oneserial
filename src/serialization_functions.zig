@@ -406,7 +406,10 @@ fn skipValue(comptime T: type, r: *Reader()) ValidationError!void {
         .error_union => |ei| {
             const tag = try r.readPod(u8);
             switch (tag) {
-                0 => _ = try r.readPod(u16),
+                0 => {
+                    const code = try r.readPod(u16);
+                    if (errorSetFromCode(ei.error_set, code) == null) return error.InvalidTag;
+                },
                 1 => try skipValue(ei.payload, r),
                 else => return error.InvalidTag,
             }
@@ -432,11 +435,58 @@ fn Decoded(comptime T: type) type {
     return struct { value: T };
 }
 
+fn freeDecoded(comptime T: type, gpa: std.mem.Allocator, value: *T) void {
+    switch (@typeInfo(T)) {
+        .pointer => |pi| switch (pi.size) {
+            .one => {
+                freeDecoded(pi.child, gpa, @constCast(value.*));
+                gpa.destroy(@constCast(value.*));
+            },
+            .slice => {
+                if (@sizeOf(pi.child) > 0) {
+                    for (value.*) |*elem| freeDecoded(pi.child, gpa, @constCast(elem));
+                }
+                gpa.free(@constCast(value.*));
+            },
+            .many, .c => {},
+        },
+        .array => |ai| inline for (0..ai.len) |i| freeDecoded(ai.child, gpa, &value.*[i]),
+        .@"struct" => |si| {
+            inline for (si.fields) |field| {
+                var field_copy = @field(value.*, field.name);
+                freeDecoded(field.type, gpa, &field_copy);
+            }
+        },
+        .optional => |oi| {
+            if (value.*) |*payload| freeDecoded(oi.child, gpa, @constCast(payload));
+        },
+        .error_union => |ei| {
+            if (value.*) |*payload| freeDecoded(ei.payload, gpa, @constCast(payload)) else |_| {}
+        },
+        .@"union" => switch (value.*) {
+            inline else => |*payload| freeDecoded(@TypeOf(payload.*), gpa, @constCast(payload)),
+        },
+        else => {},
+    }
+}
+
 fn returnDecoded(comptime T: type, decoded: Decoded(T)) T {
-    return switch (@typeInfo(T)) {
-        .error_union => if (decoded.value) |payload| payload else |e| @as(@typeInfo(T).error_union.error_set, @errorCast(e)),
-        else => decoded.value,
-    };
+    return decoded.value;
+}
+
+fn errorSetFromCode(comptime ErrorSet: type, code: u16) ?ErrorSet {
+    const maybe_fields = @typeInfo(ErrorSet).error_set;
+    if (maybe_fields) |fields| {
+        inline for (fields) |field| {
+            const e: ErrorSet = @field(ErrorSet, field.name);
+            if (@intFromError(e) == code) return e;
+        }
+        return null;
+    }
+
+    // `anyerror` cannot be exhaustively enumerated at comptime.
+    const e: anyerror = @errorFromInt(code);
+    return @as(ErrorSet, @errorCast(e));
 }
 
 fn decodeValue(comptime T: type, r: *Reader(), gpa: std.mem.Allocator) DeserializeError!Decoded(T) {
@@ -451,8 +501,16 @@ fn decodeValue(comptime T: type, r: *Reader(), gpa: std.mem.Allocator) Deseriali
         },
         .array => |ai| {
             var out: T = undefined;
+            var initialized: usize = 0;
+            errdefer {
+                var i: usize = 0;
+                while (i < initialized) : (i += 1) {
+                    freeDecoded(ai.child, gpa, &out[i]);
+                }
+            }
             inline for (0..ai.len) |i| {
                 out[i] = (try decodeValue(ai.child, r, gpa)).value;
+                initialized = i + 1;
             }
             return .{ .value = out };
         },
@@ -468,9 +526,17 @@ fn decodeValue(comptime T: type, r: *Reader(), gpa: std.mem.Allocator) Deseriali
                 const len = meta.usizeFromAnyInt(len_size) catch return error.LengthOverflow;
                 const alignment = comptime std.mem.Alignment.fromByteUnits(pi.alignment);
                 var out = try gpa.alignedAlloc(pi.child, alignment, len);
-                errdefer gpa.free(out);
+                var initialized: usize = 0;
+                errdefer {
+                    var i: usize = 0;
+                    while (i < initialized) : (i += 1) {
+                        freeDecoded(pi.child, gpa, &out[i]);
+                    }
+                    gpa.free(out);
+                }
                 for (0..len) |i| {
                     out[i] = (try decodeValue(pi.child, r, gpa)).value;
+                    initialized = i + 1;
                 }
                 return .{ .value = @as(T, out) };
             },
@@ -478,8 +544,18 @@ fn decodeValue(comptime T: type, r: *Reader(), gpa: std.mem.Allocator) Deseriali
         },
         .@"struct" => |si| {
             var out: T = undefined;
-            inline for (si.fields) |field| {
+            var initialized: usize = 0;
+            errdefer {
+                inline for (si.fields, 0..) |field, i| {
+                    if (i < initialized) {
+                        var field_copy = @field(out, field.name);
+                        freeDecoded(field.type, gpa, &field_copy);
+                    }
+                }
+            }
+            inline for (si.fields, 0..) |field, i| {
                 @field(out, field.name) = (try decodeValue(field.type, r, gpa)).value;
+                initialized = i + 1;
             }
             return .{ .value = out };
         },
@@ -499,8 +575,8 @@ fn decodeValue(comptime T: type, r: *Reader(), gpa: std.mem.Allocator) Deseriali
             switch (tag) {
                 0 => {
                     const code = try r.readPod(u16);
-                    const e: anyerror = @errorFromInt(code);
-                    out = @as(ei.error_set, @errorCast(e));
+                    const e = errorSetFromCode(ei.error_set, code) orelse return error.InvalidTag;
+                    out = e;
                 },
                 1 => {
                     out = (try decodeValue(ei.payload, r, gpa)).value;
@@ -675,7 +751,7 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
                 return toOutOfBounds(err);
             };
             const out: T = returnDecoded(T, decoded);
-            return out;
+            return @as(T, out);
         }
 
         /// Deep-decodes the view into owned memory allocated from `gpa`.
@@ -683,7 +759,7 @@ pub fn View(comptime T: type, comptime trusted: bool) type {
             var r = Reader().initAt(self.bytes, self.start, !trusted, self.endian);
             const decoded = try decodeValue(T, &r, gpa);
             const out: T = returnDecoded(T, decoded);
-            return out;
+            return @as(T, out);
         }
     };
 }
@@ -747,7 +823,7 @@ pub fn Converter(comptime T: type, comptime default_endian: std.builtin.Endian) 
             pub fn toOwned(self: @This(), gpa: std.mem.Allocator) DeserializeError!T {
                 const decoded = try decodeRootExact(T, self.bytes, true, self.endian, gpa);
                 const out: T = returnDecoded(T, decoded);
-                return out;
+                return @as(T, out);
             }
 
             /// Returns a checked field view for struct roots.
@@ -821,7 +897,7 @@ pub fn Converter(comptime T: type, comptime default_endian: std.builtin.Endian) 
             pub fn toOwned(self: @This(), gpa: std.mem.Allocator) DeserializeError!T {
                 const decoded = try decodeRootExact(T, self.bytes, false, self.endian, gpa);
                 const out: T = returnDecoded(T, decoded);
-                return out;
+                return @as(T, out);
             }
 
             /// Returns a field view for struct roots.
