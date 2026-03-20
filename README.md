@@ -155,6 +155,10 @@ const out = try oneserial.allocFromShim(T, .{}, &shim, allocator);
 
 When a pointer (or slice `.ptr`) equals `invalidPointer(...)`, OneSerial allocates that container but does not recurse deeper into pointee/element payloads.
 
+For `[]const []const u8` specifically:
+- Outer slice sentinel (`[*]const []const u8`) with `len = N` allocates `N` inner-slice headers.
+- Inner `[]const u8` element sentinels allocate each inner byte buffer by its `len`.
+
 > [!IMPORTANT]
 > Values returned by `allocFromShim` may contain undefined non-shape data.  
 > You must initialize payload data before reading it.

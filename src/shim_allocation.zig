@@ -18,6 +18,8 @@ fn needsShimInit(comptime T: type) bool {
     };
 }
 
+/// Internal cleanup for partially allocated shim builds.
+/// Frees only memory that `allocFromShimValue` allocated.
 pub fn freeShimAllocated(
     comptime T: type,
     gpa: std.mem.Allocator,
@@ -91,6 +93,9 @@ pub fn freeShimAllocated(
     }
 }
 
+/// Internal shim allocator for `oneserial`.
+/// Builds an owned shape from `shim` while skipping deep recursion when
+/// `is_invalid_pointer_fn` reports a pointer sentinel.
 pub fn allocFromShimValue(
     comptime T: type,
     shim: *const T,
