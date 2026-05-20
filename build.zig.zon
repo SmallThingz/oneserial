@@ -6,9 +6,6 @@
     "README.md",
     "build.zig",
     "build.zig.zon",
-    "src/meta.zig",
-    "src/root.zig",
-    "src/serialization_functions.zig",
-    "src/test.zig",
+    "src/",
   },
 }
