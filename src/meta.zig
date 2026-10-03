@@ -23,3 +23,17 @@ pub fn usizeFromAnyInt(v: anytype) MathError!usize {
 pub fn castUsize(comptime T: type, value: usize) MathError!T {
     return std.math.cast(T, value) orelse error.Overflow;
 }
+
+/// Keep recursive declaration coverage for the package's test namespaces.
+pub fn refAllDeclsRecursive(comptime T: type) void {
+    if (!@import("builtin").is_test) return;
+    inline for (comptime std.meta.declarations(T)) |name| {
+        if (@TypeOf(@field(T, name)) == type) {
+            switch (@typeInfo(@field(T, name))) {
+                .@"struct", .@"enum", .@"union", .@"opaque" => refAllDeclsRecursive(@field(T, name)),
+                else => {},
+            }
+        }
+        _ = &@field(T, name);
+    }
+}
