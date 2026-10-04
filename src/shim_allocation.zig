@@ -8,8 +8,8 @@ fn needsShimInit(comptime T: type) bool {
         },
         .array => |ai| needsShimInit(ai.child),
         .@"struct" => |si| blk: {
-            inline for (si.fields) |field| {
-                if (needsShimInit(field.type)) break :blk true;
+            inline for (si.field_types) |Field| {
+                if (needsShimInit(Field)) break :blk true;
             }
             break :blk false;
         },
@@ -58,11 +58,11 @@ pub fn freeShimAllocated(
             }
         },
         .@"struct" => |si| {
-            inline for (si.fields) |field| {
-                if (needsShimInit(field.type)) {
-                    var field_copy = @field(value.*, field.name);
-                    var shim_field = @field(shim.*, field.name);
-                    freeShimAllocated(field.type, gpa, &field_copy, &shim_field, is_invalid_pointer_fn);
+            inline for (si.field_names, si.field_types) |fname, Field| {
+                if (needsShimInit(Field)) {
+                    var field_copy = @field(value.*, fname);
+                    var shim_field = @field(shim.*, fname);
+                    freeShimAllocated(Field, gpa, &field_copy, &shim_field, is_invalid_pointer_fn);
                 }
             }
         },
@@ -138,7 +138,7 @@ pub fn allocFromShimValue(
             },
             .slice => {
                 const len = shim.*.len;
-                const alignment = comptime std.mem.Alignment.fromByteUnits(pi.alignment);
+                const alignment = comptime std.mem.Alignment.fromByteUnits(pi.attrs.@"align" orelse @alignOf(pi.child));
                 var out = try gpa.alignedAlloc(pi.child, alignment, len);
                 errdefer gpa.free(out);
 
@@ -166,15 +166,15 @@ pub fn allocFromShimValue(
             var out: T = undefined;
             var initialized: usize = 0;
             errdefer {
-                inline for (si.fields, 0..) |field, i| {
-                    if (i < initialized and needsShimInit(field.type)) {
-                        freeShimAllocated(field.type, gpa, &@field(out, field.name), &@field(shim.*, field.name), is_invalid_pointer_fn);
+                inline for (si.field_names, si.field_types, 0..) |fname, Field, i| {
+                    if (i < initialized and needsShimInit(Field)) {
+                        freeShimAllocated(Field, gpa, &@field(out, fname), &@field(shim.*, fname), is_invalid_pointer_fn);
                     }
                 }
             }
-            inline for (si.fields, 0..) |field, i| {
-                if (needsShimInit(field.type)) {
-                    @field(out, field.name) = try allocFromShimValue(field.type, &@field(shim.*, field.name), gpa, is_invalid_pointer_fn);
+            inline for (si.field_names, si.field_types, 0..) |fname, Field, i| {
+                if (needsShimInit(Field)) {
+                    @field(out, fname) = try allocFromShimValue(Field, &@field(shim.*, fname), gpa, is_invalid_pointer_fn);
                 }
                 initialized = i + 1;
             }
@@ -218,10 +218,11 @@ pub fn allocFromShimValue(
         .enum_literal,
         .@"opaque",
         .error_set,
+        .spirv,
         => @compileError("Unsupported type in oneserial: " ++ @typeName(T)),
     }
 }
 
 test {
-    std.testing.refAllDeclsRecursive(@This());
+    @import("meta.zig").refAllDeclsRecursive(@This());
 }

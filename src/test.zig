@@ -31,14 +31,13 @@ fn expectEquivalent(expected: anytype, actual: anytype) anyerror!void {
             }
         },
         .vector => |info| {
-            var i: usize = 0;
-            while (i < info.len) : (i += 1) {
+            inline for (0..info.len) |i| {
                 try testing.expect(std.meta.eql(expected[i], actual[i]));
             }
         },
         .@"struct" => |si| {
-            inline for (si.fields) |field| {
-                try expectEquivalent(@field(expected, field.name), @field(actual, field.name));
+            inline for (si.field_names) |fname| {
+                try expectEquivalent(@field(expected, fname), @field(actual, fname));
             }
         },
         .@"union" => |ui| {
@@ -87,16 +86,16 @@ fn needsFree(comptime T: type) bool {
         },
         .array => |ai| needsFree(ai.child),
         .@"struct" => |si| blk: {
-            inline for (si.fields) |field| {
-                if (needsFree(field.type)) break :blk true;
+            inline for (si.field_types) |Field| {
+                if (needsFree(Field)) break :blk true;
             }
             break :blk false;
         },
         .optional => |oi| needsFree(oi.child),
         .error_union => |ei| needsFree(ei.payload),
         .@"union" => |ui| blk: {
-            inline for (ui.fields) |field| {
-                if (needsFree(field.type)) break :blk true;
+            inline for (ui.field_types) |Field| {
+                if (needsFree(Field)) break :blk true;
             }
             break :blk false;
         },
@@ -131,10 +130,10 @@ fn freeOwned(comptime T: type, gpa: std.mem.Allocator, value: *T) void {
             }
         },
         .@"struct" => |si| {
-            inline for (si.fields) |field| {
-                if (needsFree(field.type)) {
-                    var field_copy = @field(value.*, field.name);
-                    freeOwned(field.type, gpa, &field_copy);
+            inline for (si.field_names, si.field_types) |fname, Field| {
+                if (needsFree(Field)) {
+                    var field_copy = @field(value.*, fname);
+                    freeOwned(Field, gpa, &field_copy);
                 }
             }
         },
@@ -1750,10 +1749,10 @@ test "single gigantic all-supported-types chaos graph with triple and quadruple 
 
 test "type-id coverage for every Zig language type tag" {
     const SF = one.SerializationFunctions;
-    const fields = @typeInfo(std.builtin.TypeId).@"enum".fields;
+    const values = @typeInfo(std.builtin.TypeId).@"enum".field_values;
 
-    inline for (fields) |f| {
-        const tag: std.builtin.TypeId = @enumFromInt(f.value);
+    inline for (values) |value| {
+        const tag: std.builtin.TypeId = @fromBackingInt(@intCast(value));
         const expected = switch (tag) {
             .void,
             .bool,
@@ -1780,6 +1779,7 @@ test "type-id coverage for every Zig language type tag" {
             .@"opaque",
             .error_union,
             .error_set,
+            .spirv,
             => false,
         };
         try testing.expectEqual(expected, SF.supportsTypeId(tag));
@@ -1893,5 +1893,19 @@ test "view endianness can be switched on-the-fly" {
 }
 
 test {
-    std.testing.refAllDeclsRecursive(@This());
+    @import("meta.zig").refAllDeclsRecursive(@This());
+}
+
+test "explicit slice alignment and unnamed enum tags survive reflection migration" {
+    const Tag = enum(u16) { known = 1, _ };
+    var data: [3]u32 align(64) = .{ 17, 23, 42 };
+    const T = struct { data: []align(64) const u32, tag: Tag };
+    try testRoundtrip(T{ .data = &data, .tag = @fromBackingInt(65530) });
+
+    const sentinel = one.invalidPointer([*]align(64) const u32);
+    const shim: []align(64) const u32 = sentinel[0..3];
+    const allocated = try one.allocFromShim(@TypeOf(shim), .{}, &shim, testing.allocator);
+    defer testing.allocator.free(allocated);
+    try testing.expectEqual(@as(usize, 3), allocated.len);
+    try testing.expect(std.mem.isAligned(@intFromPtr(allocated.ptr), 64));
 }

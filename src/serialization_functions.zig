@@ -58,8 +58,8 @@ fn supportsTypeInner(comptime T: type, comptime seen: []const type) bool {
             .many, .c => false,
         },
         .@"struct" => |si| blk: {
-            inline for (si.fields) |field| {
-                if (!supportsTypeInner(field.type, next_seen)) break :blk false;
+            inline for (si.field_types) |Field| {
+                if (!supportsTypeInner(Field, next_seen)) break :blk false;
             }
             break :blk true;
         },
@@ -67,8 +67,8 @@ fn supportsTypeInner(comptime T: type, comptime seen: []const type) bool {
         .error_union => false,
         .@"union" => |ui| blk: {
             if (ui.tag_type == null) break :blk false;
-            inline for (ui.fields) |field| {
-                if (!supportsTypeInner(field.type, next_seen)) break :blk false;
+            inline for (ui.field_types) |Field| {
+                if (!supportsTypeInner(Field, next_seen)) break :blk false;
             }
             break :blk true;
         },
@@ -83,6 +83,7 @@ fn supportsTypeInner(comptime T: type, comptime seen: []const type) bool {
         .enum_literal,
         .@"opaque",
         .error_set,
+        .spirv,
         => false,
     };
 }
@@ -104,14 +105,14 @@ fn maxAlignmentInner(comptime T: type, comptime seen: []const type) std.mem.Alig
         .pointer => |pi| switch (pi.size) {
             .one => maxAlignmentInner(pi.child, next_seen),
             .slice => maxAlignmentInner(pi.child, next_seen)
-                .max(std.mem.Alignment.fromByteUnits(pi.alignment))
+                .max(std.mem.Alignment.fromByteUnits(pi.attrs.@"align" orelse @alignOf(pi.child)))
                 .max(std.mem.Alignment.fromByteUnits(@alignOf(root.Size))),
             .many, .c => @compileError("Unsupported pointer type in oneserial destructive format: " ++ @tagName(pi.size) ++ " for " ++ @typeName(T)),
         },
         .@"struct" => |si| blk: {
             var out: std.mem.Alignment = .@"1";
-            inline for (si.fields) |field| {
-                out = out.max(maxAlignmentInner(field.type, next_seen));
+            inline for (si.field_types) |Field| {
+                out = out.max(maxAlignmentInner(Field, next_seen));
             }
             break :blk out;
         },
@@ -120,12 +121,12 @@ fn maxAlignmentInner(comptime T: type, comptime seen: []const type) std.mem.Alig
         .@"union" => |ui| blk: {
             var out: std.mem.Alignment = .@"1";
             if (ui.tag_type) |Tag| out = out.max(std.mem.Alignment.fromByteUnits(@alignOf(Tag)));
-            inline for (ui.fields) |field| {
-                out = out.max(maxAlignmentInner(field.type, next_seen));
+            inline for (ui.field_types) |Field| {
+                out = out.max(maxAlignmentInner(Field, next_seen));
             }
             break :blk out;
         },
-        .type, .noreturn, .comptime_int, .comptime_float, .undefined, .@"fn", .frame, .@"anyframe", .enum_literal, .@"opaque", .error_set => {
+        .type, .noreturn, .comptime_int, .comptime_float, .undefined, .@"fn", .frame, .@"anyframe", .enum_literal, .@"opaque", .error_set, .spirv => {
             @compileError("Unsupported type in oneserial: " ++ @typeName(T));
         },
     };
@@ -154,16 +155,16 @@ fn containsDynamic(comptime T: type) bool {
         },
         .array => |ai| containsDynamic(ai.child),
         .@"struct" => |si| blk: {
-            inline for (si.fields) |field| {
-                if (containsDynamic(field.type)) break :blk true;
+            inline for (si.field_types) |Field| {
+                if (containsDynamic(Field)) break :blk true;
             }
             break :blk false;
         },
         .optional => |oi| containsDynamic(oi.child),
         .error_union => false,
         .@"union" => |ui| blk: {
-            inline for (ui.fields) |field| {
-                if (containsDynamic(field.type)) break :blk true;
+            inline for (ui.field_types) |Field| {
+                if (containsDynamic(Field)) break :blk true;
             }
             break :blk false;
         },
@@ -179,7 +180,7 @@ fn pointerSentinelInt(comptime P: type) usize {
     if (ti.pointer.size == .slice) {
         @compileError("invalidPointer() does not accept slice types directly; pass the pointer type used by the slice `.ptr` field.");
     }
-    const pointer_alignment = if (ti.pointer.alignment == 0) @alignOf(ti.pointer.child) else ti.pointer.alignment;
+    const pointer_alignment = ti.pointer.attrs.@"align" orelse @alignOf(ti.pointer.child);
     const sentinel_alignment = @max(pointer_alignment, maxAlignmentOf(ti.pointer.child).toByteUnits());
     return std.math.maxInt(usize) & ~(sentinel_alignment - 1);
 }
@@ -205,7 +206,7 @@ fn maybeSwapPod(comptime T: type, value: T, endian: std.builtin.Endian) T {
     return switch (@typeInfo(T)) {
         .int => if (@bitSizeOf(T) % 8 == 0) @byteSwap(value) else value,
         .float => blk: {
-            const Bits = std.meta.Int(.unsigned, @bitSizeOf(T));
+            const Bits = @Int(.unsigned, @bitSizeOf(T));
             const bits: Bits = @bitCast(value);
             break :blk @bitCast(@byteSwap(bits));
         },
@@ -302,7 +303,7 @@ fn writeTag(comptime Tag: type, w: *Writer(), tag: Tag) ValidationError!void {
     switch (@typeInfo(Tag)) {
         .@"enum" => |ei| {
             const Raw = ei.tag_type;
-            const raw: Raw = @intCast(@intFromEnum(tag));
+            const raw: Raw = @intCast(@backingInt(tag));
             try w.writePod(Raw, raw);
         },
         .int => try w.writePod(Tag, tag),
@@ -315,7 +316,7 @@ fn readTag(comptime Tag: type, r: *Reader()) ValidationError!Tag {
         .@"enum" => |ei| {
             const Raw = ei.tag_type;
             const raw = try r.readPod(Raw);
-            return std.meta.intToEnum(Tag, raw) catch error.InvalidUnionTag;
+            return std.enums.fromInt(Tag, raw) orelse error.InvalidUnionTag;
         },
         .int => return try r.readPod(Tag),
         else => @compileError("Unsupported union tag type: " ++ @typeName(Tag)),
@@ -328,7 +329,7 @@ fn serializeValue(comptime T: type, w: *Writer(), value: *const T) ValidationErr
         .bool, .int, .float, .vector => try w.writePod(T, value.*),
         .@"enum" => |ei| {
             const Raw = ei.tag_type;
-            const raw: Raw = @intCast(@intFromEnum(value.*));
+            const raw: Raw = @intCast(@backingInt(value.*));
             try w.writePod(Raw, raw);
         },
         .array => |ai| {
@@ -348,9 +349,9 @@ fn serializeValue(comptime T: type, w: *Writer(), value: *const T) ValidationErr
             .many, .c => @compileError("Unsupported pointer type in oneserial destructive format: " ++ @tagName(pi.size) ++ " for " ++ @typeName(T)),
         },
         .@"struct" => |si| {
-            inline for (si.fields) |field| {
-                var field_copy = @field(value.*, field.name);
-                try serializeValue(field.type, w, &field_copy);
+            inline for (si.field_names, si.field_types) |fname, Field| {
+                var field_copy = @field(value.*, fname);
+                try serializeValue(Field, w, &field_copy);
             }
         },
         .optional => |oi| {
@@ -374,7 +375,7 @@ fn serializeValue(comptime T: type, w: *Writer(), value: *const T) ValidationErr
                 },
             }
         },
-        .type, .noreturn, .comptime_int, .comptime_float, .undefined, .@"fn", .frame, .@"anyframe", .enum_literal, .@"opaque", .error_set => {
+        .type, .noreturn, .comptime_int, .comptime_float, .undefined, .@"fn", .frame, .@"anyframe", .enum_literal, .@"opaque", .error_set, .spirv => {
             @compileError("Unsupported type in oneserial: " ++ @typeName(T));
         },
     }
@@ -389,7 +390,7 @@ fn skipValue(comptime T: type, r: *Reader()) ValidationError!void {
         .@"enum" => |ei| {
             const Raw = ei.tag_type;
             const raw = try r.readPod(Raw);
-            _ = std.meta.intToEnum(T, raw) catch return error.InvalidEnumTag;
+            _ = std.enums.fromInt(T, raw) orelse return error.InvalidEnumTag;
         },
         .array => |ai| {
             inline for (0..ai.len) |_| {
@@ -409,8 +410,8 @@ fn skipValue(comptime T: type, r: *Reader()) ValidationError!void {
             .many, .c => @compileError("Unsupported pointer type in oneserial destructive format: " ++ @tagName(pi.size) ++ " for " ++ @typeName(T)),
         },
         .@"struct" => |si| {
-            inline for (si.fields) |field| {
-                try skipValue(field.type, r);
+            inline for (si.field_types) |Field| {
+                try skipValue(Field, r);
             }
         },
         .optional => |oi| {
@@ -425,15 +426,15 @@ fn skipValue(comptime T: type, r: *Reader()) ValidationError!void {
         .@"union" => |ui| {
             const Tag = ui.tag_type orelse @compileError("Cannot skip untagged union: " ++ @typeName(T));
             const tag = try readTag(Tag, r);
-            inline for (ui.fields) |field| {
-                if (@field(Tag, field.name) == tag) {
-                    try skipValue(field.type, r);
+            inline for (ui.field_names, ui.field_types) |fname, Field| {
+                if (@field(Tag, fname) == tag) {
+                    try skipValue(Field, r);
                     return;
                 }
             }
             return error.InvalidUnionTag;
         },
-        .type, .noreturn, .comptime_int, .comptime_float, .undefined, .@"fn", .frame, .@"anyframe", .enum_literal, .@"opaque", .error_set => {
+        .type, .noreturn, .comptime_int, .comptime_float, .undefined, .@"fn", .frame, .@"anyframe", .enum_literal, .@"opaque", .error_set, .spirv => {
             @compileError("Unsupported type in oneserial: " ++ @typeName(T));
         },
     }
@@ -460,9 +461,9 @@ fn freeDecoded(comptime T: type, gpa: std.mem.Allocator, value: *T) void {
         },
         .array => |ai| inline for (0..ai.len) |i| freeDecoded(ai.child, gpa, &value.*[i]),
         .@"struct" => |si| {
-            inline for (si.fields) |field| {
-                var field_copy = @field(value.*, field.name);
-                freeDecoded(field.type, gpa, &field_copy);
+            inline for (si.field_names, si.field_types) |fname, Field| {
+                var field_copy = @field(value.*, fname);
+                freeDecoded(Field, gpa, &field_copy);
             }
         },
         .optional => |oi| {
@@ -488,7 +489,7 @@ fn decodeValue(comptime T: type, r: *Reader(), gpa: std.mem.Allocator) Deseriali
         .@"enum" => |ei| {
             const Raw = ei.tag_type;
             const raw = try r.readPod(Raw);
-            return .{ .value = std.meta.intToEnum(T, raw) catch return error.InvalidEnumTag };
+            return .{ .value = std.enums.fromInt(T, raw) orelse return error.InvalidEnumTag };
         },
         .array => |ai| {
             var out: T = undefined;
@@ -515,7 +516,7 @@ fn decodeValue(comptime T: type, r: *Reader(), gpa: std.mem.Allocator) Deseriali
             .slice => {
                 const len_size = try r.readPod(root.Size);
                 const len = meta.usizeFromAnyInt(len_size) catch return error.LengthOverflow;
-                const alignment = comptime std.mem.Alignment.fromByteUnits(pi.alignment);
+                const alignment = comptime std.mem.Alignment.fromByteUnits(pi.attrs.@"align" orelse @alignOf(pi.child));
                 var out = try gpa.alignedAlloc(pi.child, alignment, len);
                 var initialized: usize = 0;
                 errdefer {
@@ -537,15 +538,15 @@ fn decodeValue(comptime T: type, r: *Reader(), gpa: std.mem.Allocator) Deseriali
             var out: T = undefined;
             var initialized: usize = 0;
             errdefer {
-                inline for (si.fields, 0..) |field, i| {
+                inline for (si.field_names, si.field_types, 0..) |fname, Field, i| {
                     if (i < initialized) {
-                        var field_copy = @field(out, field.name);
-                        freeDecoded(field.type, gpa, &field_copy);
+                        var field_copy = @field(out, fname);
+                        freeDecoded(Field, gpa, &field_copy);
                     }
                 }
             }
-            inline for (si.fields, 0..) |field, i| {
-                @field(out, field.name) = (try decodeValue(field.type, r, gpa)).value;
+            inline for (si.field_names, si.field_types, 0..) |fname, Field, i| {
+                @field(out, fname) = (try decodeValue(Field, r, gpa)).value;
                 initialized = i + 1;
             }
             return .{ .value = out };
@@ -564,15 +565,15 @@ fn decodeValue(comptime T: type, r: *Reader(), gpa: std.mem.Allocator) Deseriali
         .@"union" => |ui| {
             const Tag = ui.tag_type orelse @compileError("Cannot decode untagged union: " ++ @typeName(T));
             const tag = try readTag(Tag, r);
-            inline for (ui.fields) |field| {
-                if (@field(Tag, field.name) == tag) {
-                    const payload = (try decodeValue(field.type, r, gpa)).value;
-                    return .{ .value = @unionInit(T, field.name, payload) };
+            inline for (ui.field_names, ui.field_types) |fname, Field| {
+                if (@field(Tag, fname) == tag) {
+                    const payload = (try decodeValue(Field, r, gpa)).value;
+                    return .{ .value = @unionInit(T, fname, payload) };
                 }
             }
             return error.InvalidUnionTag;
         },
-        .type, .noreturn, .comptime_int, .comptime_float, .undefined, .@"fn", .frame, .@"anyframe", .enum_literal, .@"opaque", .error_set => {
+        .type, .noreturn, .comptime_int, .comptime_float, .undefined, .@"fn", .frame, .@"anyframe", .enum_literal, .@"opaque", .error_set, .spirv => {
             @compileError("Unsupported type in oneserial: " ++ @typeName(T));
         },
     }
@@ -580,8 +581,8 @@ fn decodeValue(comptime T: type, r: *Reader(), gpa: std.mem.Allocator) Deseriali
 
 fn fieldTypeByName(comptime S: type, comptime field_name: []const u8) type {
     const si = @typeInfo(S).@"struct";
-    inline for (si.fields) |field| {
-        if (comptime std.mem.eql(u8, field.name, field_name)) return field.type;
+    inline for (si.field_names, si.field_types) |fname, Field| {
+        if (comptime std.mem.eql(u8, fname, field_name)) return Field;
     }
     @compileError("Unknown field '" ++ field_name ++ "' on " ++ @typeName(S));
 }
@@ -589,9 +590,9 @@ fn fieldTypeByName(comptime S: type, comptime field_name: []const u8) type {
 fn fieldStart(comptime S: type, comptime field_name: []const u8, bytes: []const u8, start: usize, checked: bool, endian: std.builtin.Endian) ValidationError!usize {
     var r = Reader().initAt(bytes, start, checked, endian);
     const si = @typeInfo(S).@"struct";
-    inline for (si.fields) |field| {
-        if (comptime std.mem.eql(u8, field.name, field_name)) return r.pos;
-        try skipValue(field.type, &r);
+    inline for (si.field_names, si.field_types) |fname, Field| {
+        if (comptime std.mem.eql(u8, fname, field_name)) return r.pos;
+        try skipValue(Field, &r);
     }
     unreachable;
 }
@@ -981,5 +982,5 @@ pub fn Converter(comptime T: type, comptime default_endian: std.builtin.Endian) 
 }
 
 test {
-    std.testing.refAllDeclsRecursive(@This());
+    @import("meta.zig").refAllDeclsRecursive(@This());
 }

@@ -194,6 +194,8 @@ Available on `Untrusted`, `Trusted`, and nested views as type-appropriate:
 
 ## Development
 
+Requires Zig 0.17.0.
+
 Run tests:
 
 ```bash

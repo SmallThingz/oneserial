@@ -64,6 +64,6 @@ pub fn allocFromShim(
 }
 
 test {
-    std.testing.refAllDeclsRecursive(@This());
-    std.testing.refAllDeclsRecursive(SerializationFunctions);
+    @import("meta.zig").refAllDeclsRecursive(@This());
+    @import("meta.zig").refAllDeclsRecursive(SerializationFunctions);
 }
